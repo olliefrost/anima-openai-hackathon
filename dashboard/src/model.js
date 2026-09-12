@@ -72,16 +72,16 @@ export function evaluateBookings(decision, bookings, dischargeAt) {
     // "not provably before discharge" rather than being excluded.
     const afterDischarge = !Number.isFinite(dischargeAt) || !Number.isFinite(booking.startsAt) || booking.startsAt >= dischargeAt;
     if (!afterDischarge) {
-      return { id: booking.id, afterDischarge, matches: null, reason: 'Booked before discharge — not counted as follow-up care.' };
+      return { id: booking.id, matches: null, afterDischarge, reason: 'Booked before discharge — not counted as follow-up care.' };
     }
     if (decision.ambiguous) {
-      return { id: booking.id, afterDischarge, matches: null, reason: 'The care decision itself was ambiguous, so this booking was not checked against a care type.' };
+      return { id: booking.id, matches: null, afterDischarge, reason: 'The care decision itself was ambiguous, so this booking was not checked against a care type.' };
     }
     if (!decision.careNeeded || !decision.careType) {
-      return { id: booking.id, afterDischarge, matches: null, reason: 'No follow-on care was identified as needed, so this booking was not checked against a care type.' };
+      return { id: booking.id, matches: null, afterDischarge, reason: 'No follow-on care was identified as needed, so this booking was not checked against a care type.' };
     }
     const { matches, reason } = matchExplanation(booking, decision.careType);
-    return { id: booking.id, afterDischarge, matches, reason };
+    return { id: booking.id, matches, afterDischarge, reason };
   });
 }
 

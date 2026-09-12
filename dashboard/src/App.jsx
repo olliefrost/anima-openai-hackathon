@@ -21,9 +21,20 @@ function formatDate(timestamp) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
 }
 
-function formatCareType(type) {
-  if (!type) return 'None identified';
-  return type.split('-').map((word) => word[0].toUpperCase() + word.slice(1)).join(' ');
+// Readable headings for the discharge note's raw section keys — falls back to
+// a generic camelCase-to-words split for any key not listed here.
+const SECTION_LABELS = {
+  reason: 'Reason for admission',
+  course: 'Hospital course',
+  results: 'Results',
+  diagnoses: 'Diagnoses',
+  medicationChanges: 'Medication changes',
+  followUp: 'Follow-up',
+  gpActions: 'GP actions',
+};
+
+function sectionLabel(key) {
+  return SECTION_LABELS[key] || key.replace(/([A-Z])/g, ' $1').replace(/^./, (char) => char.toUpperCase());
 }
 
 async function postJson(path, body) {
@@ -31,6 +42,10 @@ async function postJson(path, body) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Request failed.');
   return data;
+}
+
+function newIdempotencyKey(patientId) {
+  return `home-visit-${patientId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function StatusBadge({ status }) {
@@ -43,16 +58,40 @@ function UrgencyBadge({ score }) {
   return <span className={`badge ${urgencyBadgeClass(score)}`}>{urgencyLabel(score)} · {score}</span>;
 }
 
-function Sidebar({ view, setView }) {
+function Sidebar({ activePage, onPageChange }) {
   return <aside className="sidebar">
     <a className="brand" href="/"><span className="brandmark">c</span> careloop<span className="branddot">●</span></a>
-    <div className="workspace">DISCHARGE RECONCILIATION</div>
-    <nav aria-label="Main navigation">
-      <button className={`nav ${view === 'single' ? 'active' : ''}`} onClick={() => setView('single')}><span>◎</span> Check one patient</button>
-      <button className={`nav ${view === 'sweep' ? 'active' : ''}`} onClick={() => setView('sweep')}><span>▦</span> Full sweep</button>
+    <div className="workspace">HOME VISIT BOOKING</div>
+    <nav style={{ display: 'flex', flexDirection: 'column', gap: 8, margin: '16px 0' }}>
+      <button
+        onClick={() => onPageChange('sweep')}
+        style={{
+          padding: '8px 12px',
+          textAlign: 'left',
+          backgroundColor: activePage === 'sweep' ? '#f3f4f6' : 'transparent',
+          border: 'none',
+          borderRadius: 4,
+          cursor: 'pointer',
+          fontWeight: activePage === 'sweep' ? 600 : 400,
+        }}
+      >
+        Full sweep
+      </button>
+      <button
+        onClick={() => onPageChange('check')}
+        style={{
+          padding: '8px 12px',
+          textAlign: 'left',
+          backgroundColor: activePage === 'check' ? '#f3f4f6' : 'transparent',
+          border: 'none',
+          borderRadius: 4,
+          cursor: 'pointer',
+          fontWeight: activePage === 'check' ? 600 : 400,
+        }}
+      >
+        Check a patient
+      </button>
     </nav>
-    <div className="sidebar-note"><span className="connection-dot" /> Discharge decision meets booked care.<p>Reads hospital, then checks community — never writes back.</p></div>
-    <div className="profile"><div className="avatar">DR</div><div>Discharge reviewer<small>Local workspace</small></div></div>
   </aside>;
 }
 
@@ -71,38 +110,153 @@ function ConnectionDialog({ dialogRef, loading, error, onConnect }) {
   </dialog>;
 }
 
-function DischargeSections({ sections }) {
+// Keep the raw discharge letter out of the way until it is needed, then show
+// every recorded section with the upstream keys reformatted for people.
+function DischargeLetter({ sections }) {
   const entries = Object.entries(sections || {}).filter(([, value]) => value);
-  if (entries.length === 0) return <p className="hint">No sections recorded on this discharge note.</p>;
-  return <dl>{entries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>;
+  return <details className="discharge-letter">
+    <summary>Full discharge summary letter</summary>
+    <div className="discharge-letter-content">
+      {entries.length === 0
+        ? <p className="hint">No sections recorded on this discharge note.</p>
+        : entries.map(([key, value]) => <section key={key}>
+          <h4>{sectionLabel(key)}</h4>
+          <p>{value}</p>
+        </section>)}
+    </div>
+  </details>;
 }
 
-// Per-booking verdict badge from a bookingEvaluations entry (see model.js
-// evaluateBookings). `matches` is true/false/null — null covers both "not
-// checked" (before discharge, ambiguous decision, no care needed) and
-// "unverifiable" (an `other` care type), which the reason text disambiguates.
-function matchBadge(matches) {
-  if (matches === true) return { label: 'Matches decision', className: 'green' };
-  if (matches === false) return { label: "Doesn't match decision", className: 'red' };
-  return { label: 'Not checked', className: '' };
-}
+// The centerpiece: a home visit that's needed but not yet booked gets a
+// drafted, editable form the reviewer confirms before anything is sent.
+// Careloop's one write (see AGENTS.md) only ever fires from this explicit
+// click — never automatically, and never for any other care type. Booking
+// also sends the patient an SMS confirming the date/time, as part of that
+// same confirmed action rather than a separate step.
+function HomeVisitBooking({ patientId, decision, reconciliation, onBooked }) {
+  const draft = decision.homeVisitBooking;
+  const [title, setTitle] = useState(draft?.title ?? 'Post-discharge home visit');
+  const [text, setText] = useState(draft?.text ?? '');
+  const [idempotencyKey] = useState(() => newIdempotencyKey(patientId));
+  const [status, setStatus] = useState('review'); // review | sending | booked | error | dismissed
+  const [notified, setNotified] = useState(true);
+  const [error, setError] = useState('');
 
-function BookingsList({ bookings, evaluations }) {
-  if (bookings.length === 0) return <p className="hint">No community records found for this patient.</p>;
-  const evaluationById = new Map((evaluations || []).map((evaluation) => [evaluation.id, evaluation]));
-  return <div className="timeline">{bookings.map((booking) => {
-    const evaluation = evaluationById.get(booking.id);
-    const badge = evaluation && matchBadge(evaluation.matches);
-    return <div key={booking.id}>
-      <span className={`timeline-dot ${booking.status === 'completed' ? 'done' : ''}`} />
-      <strong>{booking.title || booking.kind}</strong>{badge && <span className={`badge ${badge.className}`} style={{ marginLeft: 8 }}>{badge.label}</span>}
-      <small>{booking.kind} · {booking.status} · {formatDate(booking.startsAt)}</small>
-      {evaluation && <small>{evaluation.reason}</small>}
+  if (decision.careType !== 'home-visit' || !decision.careNeeded || decision.ambiguous) return null;
+
+  if (reconciliation.status === 'ok') {
+    return <div className="booking-card booked"><strong>Home visit already booked</strong><p className="hint">A matching community booking was found after discharge — nothing to do here.</p></div>;
+  }
+  if (reconciliation.status === 'review') {
+    return <div className="booking-card"><strong>Needs a human read before booking</strong><p className="hint">{reconciliation.reason}</p></div>;
+  }
+  if (status === 'dismissed') {
+    return <div className="booking-card"><strong>Not booked</strong><p className="hint">You chose not to book this visit right now.</p></div>;
+  }
+  if (status === 'booked') {
+    return <div className="booking-card booked">
+      <strong>Home visit booked</strong>
+      <p className="hint">Community care already has it. {notified ? 'The patient has been sent an SMS with the date and time.' : "The patient's SMS confirmation could not be sent — let them know the appointment time another way."}</p>
     </div>;
-  })}</div>;
+  }
+
+  async function confirmBooking() {
+    setStatus('sending'); setError('');
+    try {
+      const data = await postJson('/api/book-home-visit', { patientId, title: title.trim(), text: text.trim(), idempotencyKey });
+      setNotified(data.notified);
+      setStatus('booked');
+      onBooked(data.booking);
+    } catch (err) {
+      setError(err.message);
+      setStatus('error');
+    }
+  }
+
+  return <div className="booking-card">
+    <strong>Home visit needed — not yet booked</strong>
+    <p className="hint">No matching community booking was found after discharge. Review and edit this booking, then confirm — community care will have it immediately.</p>
+    <label htmlFor="visit-title">Title</label>
+    <input id="visit-title" value={title} onChange={(event) => setTitle(event.target.value)} />
+    <label htmlFor="visit-text">Note for the community team</label>
+    <textarea id="visit-text" rows={3} value={text} onChange={(event) => setText(event.target.value)} />
+    {error && <div className="error-text" role="alert">{error}</div>}
+    <div className="detail-actions">
+      <button className="button primary" disabled={status === 'sending' || !title.trim()} onClick={confirmBooking}>{status === 'sending' ? 'Booking…' : 'Book this visit'}</button>
+      <button className="button" type="button" disabled={status === 'sending'} onClick={() => setStatus('dismissed')}>Not now</button>
+    </div>
+  </div>;
 }
 
-function ResultDetail({ result }) {
+function BookingsList({ bookings }) {
+  if (bookings.length === 0) return <p className="hint">No community bookings found for this patient.</p>;
+  return <div className="timeline">{bookings.map((booking) => (
+    <div key={booking.id}>
+      <span className={`timeline-dot ${booking.status === 'completed' ? 'done' : ''}`} />
+      <strong>{booking.title || booking.kind}</strong>
+      <small>{booking.kind} · {booking.status} · {formatDate(booking.startsAt)}</small>
+    </div>
+  ))}</div>;
+}
+
+function SweepResults({ results }) {
+  if (!results || results.length === 0) return <p className="hint">No discharge summaries found.</p>;
+  const flagged = results.filter((r) => r.reconciliation?.status === 'flag');
+  const review = results.filter((r) => r.reconciliation?.status === 'review');
+  const ok = results.filter((r) => r.reconciliation?.status === 'ok');
+  const failed = results.filter((r) => r.status === 'check-failed' || r.status === 'no-discharge-summary');
+
+  return <div>
+    <p className="hint">{results.length - failed.length} of {results.length} patient checks completed successfully.</p>
+    {failed.length > 0 && <div role="alert">
+      <h3>Could not check {failed.length} {failed.length === 1 ? 'patient' : 'patients'}</h3>
+      <p>These checks did not establish whether care matches. Retry the patient ID in the individual check.</p>
+      {failed.map((r) => <p key={r.patientId} className="error-text">
+        <strong>{r.patientId}</strong>: {r.error || 'No discharge summary found.'}
+      </p>)}
+    </div>}
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 24 }}>
+      <div className="summary-card">
+        <div style={{ fontSize: 24, fontWeight: 'bold', color: '#dc2626' }}>{flagged.length}</div>
+        <p className="hint">Flagged gaps</p>
+      </div>
+      <div className="summary-card">
+        <div style={{ fontSize: 24, fontWeight: 'bold', color: '#f59e0b' }}>{review.length}</div>
+        <p className="hint">Need review</p>
+      </div>
+      <div className="summary-card">
+        <div style={{ fontSize: 24, fontWeight: 'bold', color: '#16a34a' }}>{ok.length}</div>
+        <p className="hint">Matches</p>
+      </div>
+    </div>
+    {flagged.length > 0 && <div>
+      <h3 style={{ color: '#dc2626', marginBottom: 12 }}>Flagged</h3>
+      <div style={{ display: 'grid', gap: 12, marginBottom: 24 }}>
+        {flagged.map((r) => (
+          <div key={r.patientId} style={{ padding: 12, border: '1px solid #fecaca', borderRadius: 4, backgroundColor: '#fef2f2' }}>
+            <strong>{r.patientName || r.patientId}</strong>
+            <p className="hint">{r.reconciliation.reason}</p>
+            <small><UrgencyBadge score={r.reconciliation.urgencyScore} /></small>
+          </div>
+        ))}
+      </div>
+    </div>}
+    {review.length > 0 && <div>
+      <h3 style={{ color: '#f59e0b', marginBottom: 12 }}>Need review</h3>
+      <div style={{ display: 'grid', gap: 12, marginBottom: 24 }}>
+        {review.map((r) => (
+          <div key={r.patientId} style={{ padding: 12, border: '1px solid #fde68a', borderRadius: 4, backgroundColor: '#fffbeb' }}>
+            <strong>{r.patientName || r.patientId}</strong>
+            <p className="hint">{r.reconciliation.reason}</p>
+            <small><UrgencyBadge score={r.reconciliation.urgencyScore} /></small>
+          </div>
+        ))}
+      </div>
+    </div>}
+  </div>;
+}
+
+function ResultDetail({ result, onBooked }) {
   if (result.status === 'no-discharge-summary') {
     return <div className="empty">No discharge summary found for {result.patientName || result.patientId} in Hospital EPR documents.</div>;
   }
@@ -110,67 +264,43 @@ function ResultDetail({ result }) {
     return <div className="error-text" role="alert">Couldn't complete this check: {result.error}. Try running it again.</div>;
   }
   return <>
+    <div className="summary-card">
+      <div className="eyebrow">DISCHARGE SUMMARY</div>
+      <p>{result.decision.summary}</p>
+      <small>{result.dischargeSummary.title} · Sent {formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)}</small>
+    </div>
     <div className="detail-alert">
       <StatusBadge status={result.reconciliation.status} /> <UrgencyBadge score={result.reconciliation.urgencyScore} />
       <span style={{ marginLeft: 8 }}>{result.reconciliation.reason}</span>
-      <small>{result.reconciliation.scoreExplanation}</small>
     </div>
-    <h3>Discharge note</h3>
-    <p><strong>{result.dischargeSummary.title}</strong><br /><small>Sent {formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)} by {result.dischargeSummary.sentBy || 'unknown'}</small></p>
-    <details><summary>Discharge note sections</summary><DischargeSections sections={result.dischargeSummary.sections} /></details>
-    <h3>Care decision</h3>
-    <dl>
-      <div><dt>Care needed</dt><dd>{result.decision.careNeeded ? 'Yes' : 'No'}</dd></div>
-      <div><dt>Care type</dt><dd>{formatCareType(result.decision.careType)}</dd></div>
-      <div><dt>Clinical urgency (from the note)</dt><dd>{result.decision.urgency || '—'}</dd></div>
-      <div><dt>Confidence</dt><dd>{result.decision.confidence}</dd></div>
-    </dl>
-    <p className="hint">{result.decision.rationale}</p>
+    <HomeVisitBooking patientId={result.patientId} decision={result.decision} reconciliation={result.reconciliation} onBooked={onBooked} />
+    <DischargeLetter sections={result.dischargeSummary.sections} />
     <h3>Booked community care</h3>
-    <p className="hint">Compared against the decided care type, one booking at a time — this is the evidence behind the status above.</p>
-    <BookingsList bookings={result.bookings} evaluations={result.reconciliation.bookingEvaluations} />
+    <BookingsList bookings={result.bookings} />
   </>;
 }
 
-function DetailDialog({ dialogRef, result }) {
-  if (!result) return <dialog ref={dialogRef} />;
-  return <dialog ref={dialogRef} id="detail"><div>
-    <div className="dialog-top"><div><div className="eyebrow">PATIENT CHECK</div><h2>{result.patientName || result.patientId}</h2><p>{result.patientId}</p></div><button className="icon-button" onClick={() => dialogRef.current?.close()} aria-label="Close">×</button></div>
-    <ResultDetail result={result} />
-  </div></dialog>;
-}
-
 export default function App() {
-  const [view, setView] = useState('single');
+  const [activePage, setActivePage] = useState('sweep');
   const [team, setTeam] = useState(null);
   const [key, setKey] = useState('');
   const [loading, setLoading] = useState(false);
   const [connecting, setConnecting] = useState(true);
   const [connectError, setConnectError] = useState('');
   const connectionDialog = useRef(null);
-  const detailDialog = useRef(null);
   const autoConnectStarted = useRef(false);
-
-  const [patientIdInput, setPatientIdInput] = useState('');
-  const [singleResult, setSingleResult] = useState(null);
-  const [singleLoading, setSingleLoading] = useState(false);
-  const [singleError, setSingleError] = useState('');
 
   const [sweepResults, setSweepResults] = useState(null);
   const [sweepLoading, setSweepLoading] = useState(false);
   const [sweepError, setSweepError] = useState('');
-  const [sweepCheckedAt, setSweepCheckedAt] = useState(null);
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState(null);
+
+  const [patientIdInput, setPatientIdInput] = useState('');
+  const [result, setResult] = useState(null);
+  const [checkLoading, setCheckLoading] = useState(false);
+  const [checkError, setCheckError] = useState('');
 
   function showConnection() {
     if (!connectionDialog.current?.open) connectionDialog.current?.showModal();
-  }
-
-  function showDetail(result) {
-    setSelected(result);
-    if (!detailDialog.current?.open) detailDialog.current?.showModal();
   }
 
   async function connect(candidate) {
@@ -198,90 +328,67 @@ export default function App() {
     connect('').finally(() => setConnecting(false));
   }, []);
 
-  async function runSingleCheck(event) {
-    event.preventDefault();
-    const patientId = patientIdInput.trim();
-    if (!patientId) return;
-    setSingleLoading(true); setSingleError(''); setSingleResult(null);
-    try {
-      const result = await postJson('/api/check', { key, patientId });
-      setSingleResult(result);
-    } catch (error) {
-      setSingleError(error.message);
-    } finally { setSingleLoading(false); }
-  }
-
   async function runSweep() {
     setSweepLoading(true); setSweepError(''); setSweepResults(null);
     try {
       const data = await postJson('/api/sweep', { key });
       setSweepResults(data.results);
-      setSweepCheckedAt(data.checkedAt);
     } catch (error) {
       setSweepError(error.message);
     } finally { setSweepLoading(false); }
   }
 
-  // A row can be `check-failed` (a tool failure, not a clinical finding) and
-  // has no `reconciliation` at all — read its status/urgency defensively so
-  // one bad patient doesn't crash the summary counts or the sort.
-  const counts = sweepResults ? {
-    all: sweepResults.length,
-    flag: sweepResults.filter((r) => r.reconciliation?.status === 'flag').length,
-    review: sweepResults.filter((r) => r.reconciliation?.status === 'review').length,
-    ok: sweepResults.filter((r) => r.reconciliation?.status === 'ok').length,
-  } : { all: 0, flag: 0, review: 0, ok: 0 };
+  async function runCheck(event) {
+    event.preventDefault();
+    const patientId = patientIdInput.trim();
+    if (!patientId) return;
+    setCheckLoading(true); setCheckError(''); setResult(null);
+    try {
+      const data = await postJson('/api/check', { key, patientId });
+      setResult(data);
+    } catch (error) {
+      setCheckError(error.message);
+    } finally { setCheckLoading(false); }
+  }
 
-  const filteredSweep = (sweepResults || [])
-    .filter((r) => statusFilter === 'all' || r.reconciliation?.status === statusFilter || r.status === statusFilter)
-    .filter((r) => `${r.patientName || ''} ${r.patientId}`.toLowerCase().includes(search.toLowerCase()))
-    // Highest urgency first — this is the ranking the sweep exists to produce.
-    // A `check-failed` row has no reconciliation to rank, so it sorts as 0
-    // (alongside `ok`) rather than crashing the sort.
-    .sort((a, b) => (b.reconciliation?.urgencyScore ?? 0) - (a.reconciliation?.urgencyScore ?? 0));
-
-  const metrics = [
-    ['Checked', counts.all, 'Patients with a discharge summary', 'all'],
-    ['Flagged', counts.flag, 'Needed care not matched to a booking', 'flag'],
-    ['Needs review', counts.review, 'Ambiguous decision or match', 'review'],
-    ['Matches', counts.ok, 'Booked care lines up', 'ok'],
-  ];
+  // Reflect a freshly confirmed booking in the list below immediately,
+  // rather than re-running the whole check against NHS-SIM again.
+  function handleBooked(booking) {
+    setResult((prev) => (prev ? { ...prev, bookings: [...prev.bookings, booking] } : prev));
+  }
 
   return <>
-    <Sidebar view={view} setView={setView} />
+    <Sidebar activePage={activePage} onPageChange={setActivePage} />
     <main>
-      <header><div className="breadcrumb">Workspace <span>/</span> {view === 'single' ? 'Check one patient' : 'Full sweep'}</div><button className="button" onClick={showConnection}>{team ? `Connected · ${team.world}` : connecting ? 'Connecting…' : 'Connect simulator ↗'}</button></header>
-      <section className="heading"><div><div className="eyebrow">DISCHARGE → COMMUNITY CARE</div><h1>Did the right care get booked?</h1><p>Extracts the discharge decision, then checks it against what community services actually booked.</p></div></section>
-      <div className="notice" role="status">{team ? <><span className="connection-dot" /> Connected to <strong>{team.world}</strong></> : connecting ? 'Connecting to NHS-SIM…' : 'Not connected. Connect your NHS-SIM team to run a check.'}</div>
+      <header><div className="breadcrumb">Careloop</div><button className="button" onClick={showConnection}>{team ? `Connected · ${team.world}` : connecting ? 'Connecting…' : 'Connect simulator ↗'}</button></header>
+      <section className="heading"><div><div className="eyebrow">DISCHARGE → HOME VISIT</div><h1>Does this patient need a home visit booked?</h1><p>Reads the discharge note, decides if a home visit is needed, and books it in NHS-SIM once you confirm.</p></div></section>
+      {!team && <div className="notice" role="status">{connecting ? 'Connecting to NHS-SIM…' : 'Not connected. Connect your NHS-SIM team to run a check.'}</div>}
 
-      {view === 'single' && <section className="worklist">
-        <div className="section-title"><div><h2>Check one patient</h2><p>Looks up the latest hospital discharge summary for this patient ID.</p></div></div>
+      {activePage === 'sweep' && <section className="worklist">
+        <div className="section-title"><div><h2>Full sweep</h2><p>Check all discharge summaries for care gaps in one run.</p></div></div>
         <div className="controls">
-          <form className="filters" onSubmit={runSingleCheck} style={{ width: '100%' }}>
-            <input type="text" value={patientIdInput} onChange={(event) => setPatientIdInput(event.target.value)} placeholder="Patient ID, e.g. SIM-000001" aria-label="Patient ID" style={{ minWidth: 220 }} />
-            <button className="button primary" disabled={!team || singleLoading}>{singleLoading ? 'Checking…' : 'Run check'}</button>
-          </form>
+          <button className="button primary" disabled={!team || sweepLoading} onClick={runSweep}>{sweepLoading ? 'Running sweep…' : 'Run full sweep'}</button>
         </div>
-        {singleError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{singleError}</div>}
-        {singleResult && <div style={{ padding: '0 22px 24px' }}><ResultDetail result={singleResult} /></div>}
-        {!singleResult && !singleError && <div className="empty">{team ? 'Enter a patient ID above and run a check.' : 'Connect your NHS-SIM team first.'}</div>}
+        {sweepError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{sweepError}</div>}
+        {sweepResults && <div style={{ padding: '0 22px 24px' }}><SweepResults results={sweepResults} /></div>}
+        {!sweepResults && !sweepError && <div className="empty">{sweepLoading ? 'Checking discharge summaries. This can take several minutes; results appear when all checks finish.' : team ? 'Click "Run full sweep" to check all discharge summaries.' : 'Connect your NHS-SIM team first.'}</div>}
       </section>}
 
-      {view === 'sweep' && <>
-        <section className="metrics" aria-label="Sweep summary">{metrics.map(([label, count, subtitle, filterValue], index) => <button key={label} className={`metric m${index} ${statusFilter === filterValue ? 'selected' : ''}`} onClick={() => setStatusFilter(filterValue)}><span>{label}</span><strong>{count}</strong><small>{subtitle}</small></button>)}</section>
-        <section className="worklist">
-          <div className="section-title"><div><h2>Full sweep <span>{filteredSweep.length}</span></h2><p>{sweepCheckedAt ? `Checked ${formatDate(sweepCheckedAt)}` : 'Runs a check for every patient with a hospital discharge summary.'}</p></div><button className="button primary" disabled={!team || sweepLoading} onClick={runSweep}>{sweepLoading ? 'Checking all patients…' : 'Run full sweep'}</button></div>
-          <div className="controls"><div className="filters"><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search patient…" aria-label="Search patient" /></div></div>
-          {sweepError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{sweepError}</div>}
-          {sweepResults && <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Discharge note</th><th>Decision</th><th>Booked care</th><th>Status</th><th>Urgency</th></tr></thead><tbody>{filteredSweep.map((result) => { const name = result.patientName || result.patientId; const initials = name.split(' ').slice(0, 2).map((part) => part[0]).join(''); const failed = result.status === 'check-failed'; return <tr key={result.patientId}><td><button className="patient-button" onClick={() => showDetail(result)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{result.patientId}</small></span></button></td>{failed ? <td colSpan={3}><button className="task-button" onClick={() => showDetail(result)}>Couldn't complete this check</button><small>{result.error}</small></td> : <><td><button className="task-button" onClick={() => showDetail(result)}>{result.dischargeSummary.title}</button><small>{formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)}</small></td><td>{formatCareType(result.decision.careType)}<small>{result.decision.careNeeded ? `${result.decision.confidence} confidence` : 'No care needed'}</small></td><td>{result.bookings.length} record{result.bookings.length === 1 ? '' : 's'}</td></>}<td><StatusBadge status={result.reconciliation?.status ?? result.status} /></td><td><UrgencyBadge score={result.reconciliation?.urgencyScore ?? 0} /></td></tr>; })}</tbody></table></div>}
-          {sweepResults && filteredSweep.length === 0 && <div className="empty">No matching patients.<p>Try a different filter or search.</p></div>}
-          {!sweepResults && !sweepError && <div className="empty">{team ? 'Run a full sweep to check every discharged patient.' : 'Connect your NHS-SIM team first.'}</div>}
-        </section>
-      </>}
+      {activePage === 'check' && <section className="worklist">
+        <div className="section-title"><div><h2>Check a patient</h2><p>Looks up the latest hospital discharge summary for this patient ID.</p></div></div>
+        <div className="controls">
+          <form className="filters" onSubmit={runCheck} style={{ width: '100%' }}>
+            <input type="text" value={patientIdInput} onChange={(event) => setPatientIdInput(event.target.value)} placeholder="Patient ID, e.g. SIM-000001" aria-label="Patient ID" style={{ minWidth: 220 }} />
+            <button className="button primary" disabled={!team || checkLoading}>{checkLoading ? 'Checking…' : 'Run check'}</button>
+          </form>
+        </div>
+        {checkError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{checkError}</div>}
+        {result && <div style={{ padding: '0 22px 24px' }}><ResultDetail result={result} onBooked={handleBooked} /></div>}
+        {!result && !checkError && <div className="empty">{team ? 'Enter a patient ID above and run a check.' : 'Connect your NHS-SIM team first.'}</div>}
+      </section>}
 
-      <p className="footnote">NHS-SIM synthetic data · This tool reads discharge notes and community bookings only — it never books, cancels, or edits records. Flags and reviews are a starting point for a human check, not a confirmed care omission.</p>
+      <p className="footnote">NHS-SIM synthetic data · Careloop only ever writes to NHS-SIM when you explicitly confirm a drafted home-visit booking — every other read stays read-only. A flag is a starting point for a human check, not a confirmed care omission.</p>
     </main>
     <ConnectionDialog dialogRef={connectionDialog} loading={loading} error={connectError} onConnect={connect} />
-    <DetailDialog dialogRef={detailDialog} result={selected} />
   </>;
 }

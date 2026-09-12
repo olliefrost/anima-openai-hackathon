@@ -2,31 +2,53 @@
 
 ## Project overview
 
-This repository contains **Careloop**, a local tool that checks whether a
-patient's hospital discharge care decision was actually followed up by
-community services. For a given patient (or every discharged patient at
-once) it:
+This repository contains **Careloop**, a local tool focused on one thing:
+does this patient need a home visit booked, and if so, get it booked. For a
+given patient ID it:
 
 1. Reads the patient's latest hospital discharge summary from NHS-SIM.
 2. Uses an Anima ADK agent (backed by an OpenAI model) to structure the
    free-text discharge note and decide whether community follow-up care is
-   needed, and if so what kind — flagging the decision itself as ambiguous
-   rather than guessing when the note doesn't say enough.
-3. Reads what community services actually have booked for that patient.
-4. Reconciles the two and flags a gap: care needed but nothing booked, or a
-   booking that doesn't match the decided care type — ranked by an urgency
-   score so a full sweep surfaces the most urgent discrepancies first (a
-   single check just carries its own score).
+   needed and, if so, which single category best fits (of 8 — see
+   `careTypes` in `src/model.js`) — flagging the decision itself as
+   ambiguous rather than guessing when the note doesn't say enough. The same
+   call also writes a short plain-language summary of the note, and, only
+   when the decided type is home-visit, drafts a booking title/text.
+3. Reads what community services actually have booked for that patient and
+   reconciles it against the decision: care needed but nothing booked
+   (`flag`), a booking that doesn't match the decided type (`flag`), an
+   ambiguous decision or an unverifiable match (`review`), or a match
+   (`ok`) — each carrying an urgency score for triage.
+4. **When (and only when) the decision is home-visit, needed, not
+   ambiguous, and nothing matching is booked**, shows the drafted booking as
+   an editable form. A human can edit it, then explicitly confirm to book
+   it via NHS-SIM's `schedule_visit` action, or dismiss it. Nothing is ever
+   booked without that click. As part of that same confirmed action — not a
+   separate, independently-triggered write — Careloop also sends the patient
+   an SMS (via the GP site's `messaging_action`) telling them the date and
+   time their visit is booked for.
 
-Careloop is **read-only**: it never books, cancels, or edits a NHS-SIM
-record, and it never contacts community services directly. Its output is a
-worklist for a human to review, not an automated action.
+Every other care type, and every other NHS-SIM interaction (hospital
+documents, patient lookups, community bookings), stays **read-only** — this
+tool never books, cancels, or edits anything else, and never contacts
+community services outside of that one confirmed action.
 
 This end-to-end flow has been run live against NHS-SIM and a real OpenAI
 model (not just unit-tested): fetch discharge note → agent decision → fetch
-booked care → reconcile, producing correct `ok`/`flag`/`review` outcomes for
-distinct patients. See the API and agent notes below for the two real bugs
-that surfaced during that check and how they were fixed.
+booked care → reconcile → (when applicable) book a home visit via a real
+`schedule_visit` call, confirmed against the live OpenAPI spec at
+`/api/openapi.json`. See the API and agent notes below for real bugs and
+findings that surfaced during that work and how they were handled.
+
+A prior version of this tool covered all 8 care types symmetrically and
+included a "full sweep" view checking every discharged patient at once,
+ranked by urgency. That view and its `/api/sweep` route were removed when
+the UI was refocused specifically on home visits and booking — the
+reconciliation logic for all care types stays in `model.js` (still fully
+tested) since the agent still needs it to decide what a note is asking for,
+but only home-visit is actionable from the UI today. Re-introducing a
+multi-patient sweep is a reasonable future feature, not a regression to
+"fix."
 
 ## Tech stack
 
@@ -83,12 +105,12 @@ These apply to every change in this repository:
 
 - `dashboard/index.html` — Vite HTML entrypoint.
 - `dashboard/style.css` — all dashboard styling and responsive rules.
-- `dashboard/src/App.jsx` — React UI: connect to a team, check one patient by ID, or sweep every discharged patient.
-- `dashboard/src/model.js` — pure reconciliation rules (`reconcile`, `matchesCareType`) and the `careTypes` vocabulary.
+- `dashboard/src/App.jsx` — React UI: connect to a team, check one patient by ID, view the discharge summary/original note/decision, and — for a home-visit gap — review, edit, and confirm a booking.
+- `dashboard/src/model.js` — pure reconciliation rules (`reconcile`, `matchesCareType`) and the `careTypes` vocabulary. Still covers all 8 care types even though only home-visit is bookable from the UI — the agent needs the full vocabulary to classify a note correctly.
 - `dashboard/src/model.test.js` — Node test coverage for the reconciliation rules.
 - `dashboard/vite.config.js` — Vite build and Node development proxy.
-- `dashboard/server.js` — loopback-only Node static server, the read-only NHS-SIM proxy, and the `/api/connect`, `/api/check`, `/api/sweep` routes.
-- `dashboard/careAgent.js` — the ADK agent that turns discharge-note sections into a structured care decision.
+- `dashboard/server.js` — loopback-only Node static server, the read-only NHS-SIM proxy (`/api/connect`, `/api/check`), and the one write route, `/api/book-home-visit`, gated on an explicit UI confirmation — it both schedules the visit and sends the patient a confirmation SMS as one operation.
+- `dashboard/careAgent.js` — the ADK agent that turns discharge-note sections into a structured care decision, a plain-language summary, and (when applicable) a draft home-visit booking.
 - `dashboard/README.md` — user-facing setup and behavior notes.
 
 ## Commands
@@ -119,13 +141,50 @@ Do not claim a lint check passed unless a script is added and run.
 
 This is what earlier exploration of `https://sim.animahacks.com` found. Full
 reference: `GET /api/catalogue`, human docs at `/docs/explorer/`, OpenAPI at
-`/api/openapi.json` (not yet pulled into this repo — check it before adding
-any write call).
+`/api/openapi.json`.
 
 - **Auth**: `Authorization: Bearer <SIM_API_KEY>` on every request.
 - **Sites in scope for this tool**: `hospital` (discharge documents),
-  `community` (bookings). `gp`, `pharmacy`, `diagnostics`, `referrals`,
-  `wearables` also exist but aren't read by this tool.
+  `community` (bookings, and the `schedule_visit` write), `gp` (the
+  `messaging_action` SMS confirmation sent after a booking succeeds).
+  `pharmacy`, `diagnostics`, `referrals`, `wearables` also exist but aren't
+  used by this tool.
+- **`POST /api/sites/{site}/actions`** — the one write endpoint in the whole
+  API (confirmed against the live `/api/openapi.json`); every action type
+  (`create_task`, `book_appointment`, `schedule_visit`, `draft_prescription`,
+  `messaging_action`, etc. — over 40 in total) goes through this single
+  generic route, keyed by a `type` field in the body, not a dedicated
+  endpoint per action. Careloop makes exactly two calls through it, both
+  from `scheduleHomeVisit()` in `server.js`, both firing only from the one
+  explicit UI confirmation (see clinical guardrails below):
+  1. `site: 'community'`, `type: 'schedule_visit'`:
+     ```json
+     { "type": "schedule_visit", "patientId": "SIM-000006", "title": "Post-discharge home visit", "text": "Community nursing review following hospital discharge." }
+     ```
+     The 200 response is a `Resource` (id, kind, title, status, patientId,
+     `dueAt`/`createdAt`, `data`) — normalize it with
+     `normalizeCommunityResource()` (also used for read results) so a freshly
+     booked visit looks identical to one that was already there.
+  2. `site: 'gp'`, `type: 'messaging_action'`, fired immediately after (1)
+     succeeds, using the booked visit's `dueAt` to tell the patient when
+     their visit is booked for:
+     ```json
+     { "type": "messaging_action", "patientId": "SIM-000006", "messagingCommand": { "kind": "create", "subject": "Home visit booked", "body": "Your home visit has been booked for 13 September 2026, 14:00.", "channel": "sms", "allowReply": true } }
+     ```
+     A failure here does not fail or retry the booking, which already
+     succeeded — `scheduleHomeVisit()` reports it back as `notified: false`
+     instead, so the UI can tell the reviewer to notify the patient another
+     way, without risking a duplicate visit from an automatic retry.
+  Both calls send an `Idempotency-Key` header (a stable string per attempted
+  write, e.g. `home-visit-<patientId>-<timestamp>-<random>`, with `-notify`
+  appended for the second call) — NHS-SIM's own docs say to reuse it when
+  retrying an uncertain response and use a new one for a genuinely new
+  action; the shared `postAction()` helper retries transient failures
+  (network error, 502/503/504) with the same key for exactly this reason,
+  the same transient set `upstream()` retries for reads. Other action
+  `type`s exist (task creation, referrals, prescriptions, appointments,
+  etc.) but none are called by this tool — adding another is a deliberate
+  scope change, same as these two were (see clinical guardrails below).
 - **`GET /api/sites/hospital/documents`** — returns `{ resources, patients }`.
   A discharge summary resource looks like:
   ```json
@@ -185,13 +244,14 @@ any write call).
   used as a fallback when a patient isn't in the discharge-documents response.
 - **Available but unused by this tool**: `referrals` site / `GET
   /api/nhs/ers` ("Create, read, accept and reject referrals" per the
-  catalogue) models exactly the kind of approve/reject handshake a future
-  "ping community services" write-flow would need — referral resources carry
-  a `status` (`accepted`/`rejected`/pending) and a `visibleTo` list. `eps`
-  (prescriptions), `pds`/`ods` (FHIR demographics/org lookups), and
-  `pathology`/`radiology` are also available. None of these are called
-  today; adding a write path is a deliberate scope change (see clinical
-  guardrails below), not a drive-by addition.
+  catalogue) — referral resources carry a `status`
+  (`accepted`/`rejected`/pending) and a `visibleTo` list; this was once
+  flagged as the likely mechanism for a future write path, but the actual
+  write path that shipped (`schedule_visit` via `/api/sites/{site}/actions`,
+  above) didn't need it. `eps` (prescriptions), `pds`/`ods` (FHIR
+  demographics/org lookups), and `pathology`/`radiology` are also available.
+  None of these are called today; wiring one up is a deliberate scope
+  change (see clinical guardrails below), not a drive-by addition.
 - World state resets are possible between hackathon sessions — sample IDs
   above (e.g. `SIM-000001`) may not exist in every world; always resolve
   patients by whatever your connected team's `/api/team` world actually has.
@@ -204,13 +264,14 @@ any write call).
   fetch error or a 502/503/504, and fails fast on everything else (401, 403,
   or any other status) — don't remove that retry as unnecessary complexity,
   and don't widen it to retry on non-transient statuses.
-- **The community view (`/api/sites/community/view`) is fetched once per
-  check or sweep, not once per patient.** `handleSweep` used to call
-  `bookedCareFor()` — which fetched the whole view again — inside every
-  per-patient `runCheck`, turning a sweep over ~60 patients into ~60 identical
-  ~22KB requests. `communityResources()` now fetches it once and
-  `bookedCareFor()` is a pure filter over the result; don't reintroduce a
-  per-patient fetch here.
+- **`communityResources()` fetches the whole community view once; `bookedCareFor()`
+  is a pure filter over the result, not a fetch.** This split dates back to
+  when `handleSweep` (since removed, see the project overview above) called
+  `runCheck` once per patient in a loop — without it, each patient re-fetched
+  the same ~22KB view, turning a sweep over ~60 patients into ~60 identical
+  requests. `handleCheck` only ever checks one patient now, so the stakes are
+  lower, but keep the split: don't inline the community-view fetch back into
+  `bookedCareFor()` or `runCheck()`.
 
 ## Anima ADK usage notes (handoff notes)
 
@@ -253,10 +314,32 @@ data supports:
   — how sure the decision is and how urgently a gap needs checking are
   different questions, and confidence stays a separate, visible field rather
   than silently discounting the score.
-- Keep NHS-SIM access read-only. This tool must never book, cancel, edit, or
-  message on behalf of a service. If that changes, it's a deliberate,
-  discussed scope change — see the referrals/`ers` note above for the likely
-  mechanism.
+- **NHS-SIM access is read-only, with exactly two deliberate exceptions,
+  both fired by one confirmed action**: booking a home visit via
+  `schedule_visit`, and — as an inseparable part of that same booking, not a
+  second independently-triggered write — sending the patient an SMS via the
+  GP site's `messaging_action` telling them the date and time (see the API
+  reference above). Both only ever happen when a human has explicitly
+  confirmed the drafted form in the UI — never automatically on their own
+  trigger, never from a sweep or batch context, and never for any other care
+  type or action. This pair was discussed and scoped deliberately; widening
+  it further (another action type, another site, an unconfirmed send
+  detached from a booking) is itself a new deliberate, discussed scope
+  change, not a natural extension of the one that's already there.
+- The booking form is always pre-filled from the agent's own
+  `homeVisitBooking` draft but is user-editable before sending, and the
+  human can decline it ("Not now") — the UI must never auto-submit it. The
+  SMS text is not user-editable; it's generated from the booked visit's
+  confirmed date/time, not from free text a reviewer could alter.
+- Use a fresh `Idempotency-Key` per booking attempt (see the API reference
+  above) so a retried request after a transient failure can't create a
+  duplicate visit for the same intent. The SMS reuses that key with a
+  `-notify` suffix rather than getting its own independent one, so it stays
+  traceable to the same booking intent.
+- A failed SMS send must never fail, retry, or duplicate the booking itself
+  — the booking already succeeded and is the higher-stakes write. Surface it
+  to the reviewer (`notified: false`) so they know to tell the patient
+  another way, instead of silently dropping it or risking a double booking.
 - Synthetic records must remain conspicuously labelled as demo data; never
   silently mix synthetic and live data.
 
@@ -267,8 +350,7 @@ data supports:
   rule change, including boundary conditions (ambiguous decisions, no care
   needed, bookings before vs. after discharge, unverifiable care types).
 - For UI or server changes, also start `npm run dev` and manually verify the
-  single-patient check and the full sweep at desktop and narrow viewport
-  widths.
+  single-patient check at desktop and narrow viewport widths.
 - When changing simulator or agent integration, don't stop at unit tests —
   run an actual `/api/check` against a real patient ID with a real
   `SIM_API_KEY` and `OPENAI_API_KEY` and read the response. Unit tests
@@ -277,6 +359,12 @@ data supports:
   both passed every unit test while silently returning wrong or empty
   results. Also verify invalid credentials, a missing discharge summary, and
   a missing `OPENAI_API_KEY`, without logging secrets or patient payloads.
+- When changing anything on the `schedule_visit` write path, verifying it
+  means actually calling `/api/book-home-visit` against the live simulator
+  at least once, not just asserting the request shape — but because it
+  creates a real (synthetic) resource in a shared team world, confirm with
+  whoever's driving the session before firing that live call, the same as
+  any other action with a side effect outside your local environment.
 
 ## Documentation
 

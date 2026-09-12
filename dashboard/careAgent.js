@@ -12,9 +12,14 @@ const decisionSchema = z.object({
   ambiguous: z.boolean().describe('True when the note does not give enough information to decide confidently — prefer this over guessing.'),
   confidence: z.enum(['low', 'medium', 'high']),
   rationale: z.string().describe('One or two sentences citing the specific part of the note that drove this decision.'),
+  summary: z.string().describe('A short plain-language summary (2-4 sentences) of the discharge note for a non-clinical reviewer: why the patient was admitted and what needs to happen next.'),
+  homeVisitBooking: z.object({
+    title: z.string().describe('A short booking title, e.g. "Post-discharge home visit".'),
+    text: z.string().describe('One or two sentences of context for the community team receiving this booking, grounded in the note\'s specific detail.'),
+  }).nullable().describe('A draft home-visit booking title and text, only when careType is home-visit, careNeeded is true, and ambiguous is false. Null otherwise.'),
 });
 
-const SYSTEM_PROMPT = `You are a discharge-planning assistant for a community-care reconciliation tool.
+const SYSTEM_PROMPT = `You are a discharge-planning assistant for a community home-visit booking tool.
 You are given the free-text sections of a hospital discharge summary and what is known about the patient.
 Decide whether the patient needs follow-on care from community services after this discharge, and if so,
 which single category best fits from exactly this list: ${careTypes.join(', ')}.
@@ -23,7 +28,15 @@ Only use information present in the note and patient context. If the note is gen
 missing what you'd need to decide — for example "requires community follow-up" with no detail on what
 kind — set ambiguous to true and say why in the rationale, rather than guessing a category. Do not invent
 care needs the text doesn't support. This tool is a review aid: an over-confident wrong answer causes more
-harm than an honest "ambiguous".`;
+harm than an honest "ambiguous".
+
+Also write "summary": a short, plain-language summary of the discharge note (2-4 sentences) for a
+non-clinical reviewer, covering why the patient was admitted and what needs to happen next.
+
+Only when careType is home-visit, careNeeded is true, and ambiguous is false, also draft
+"homeVisitBooking": a short title and a one-to-two sentence note for the community team who will receive
+this booking, grounded in the note's specific detail (e.g. wound care, mobility check, medication
+compliance) rather than generic boilerplate. In every other case, set homeVisitBooking to null.`;
 
 let cached = null;
 

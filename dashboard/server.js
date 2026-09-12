@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reconcile } from './src/model.js';
 import { evaluateDischargeNote, AgentError } from './careAgent.js';
+import { checkSweep, createDecisionCache } from './sweep.js';
 
 const DASHBOARD = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(DASHBOARD);
@@ -11,9 +12,6 @@ const DIST = path.join(DASHBOARD, 'dist');
 const MAX_REQUEST_BYTES = 4096;
 const SIMULATOR_URL = 'https://sim.animahacks.com';
 const PORT = Number(process.env.PORT) || 8000;
-// Each check makes one OpenAI call; a full sweep can cover dozens of patients.
-// Batch it rather than firing every request at once or running one at a time.
-const SWEEP_CONCURRENCY = 5;
 
 try {
   process.loadEnvFile(path.join(ROOT, '.env'));
@@ -169,18 +167,113 @@ async function communityResources(key) {
   return view.resources || [];
 }
 
-function bookedCareFor(resources, patientId) {
-  return resources
-    .filter((resource) => resource.patientId === patientId)
-    .map((resource) => ({
-      id: resource.id,
-      kind: resource.kind,
-      title: resource.title,
-      status: resource.status,
-      startsAt: resource.dueAt ?? resource.createdAt,
-      data: resource.data,
-    }));
+// Shared shape for a community resource, whether it came back from the
+// read-only view fetch or from the one write this tool performs (scheduling
+// a home visit) — so a freshly booked visit looks exactly like one that was
+// already there.
+function normalizeCommunityResource(resource) {
+  return {
+    id: resource.id,
+    kind: resource.kind,
+    title: resource.title,
+    status: resource.status,
+    startsAt: resource.dueAt ?? resource.createdAt,
+    data: resource.data,
+  };
 }
+
+function bookedCareFor(resources, patientId) {
+  return resources.filter((resource) => resource.patientId === patientId).map(normalizeCommunityResource);
+}
+
+// POST to NHS-SIM's one generic write endpoint (POST /api/sites/{site}/actions,
+// confirmed against the live OpenAPI spec), retrying like upstream() does for
+// reads. Retrying a POST is only safe because callers reuse the same
+// Idempotency-Key across attempts, which per NHS-SIM's own docs is exactly
+// what it's for. Shared by both writes scheduleHomeVisit() makes below.
+async function postAction(key, site, body, idempotencyKey) {
+  const url = new URL(`/api/sites/${site}/actions`, SIMULATOR_URL);
+  const requestInit = {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
+  };
+
+  let response;
+  for (let attempt = 1; attempt <= UPSTREAM_RETRIES; attempt++) {
+    let networkError = false;
+    try {
+      response = await fetch(url, requestInit);
+    } catch {
+      networkError = true;
+    }
+    const transient = networkError || [502, 503, 504].includes(response?.status);
+    if (!transient || attempt === UPSTREAM_RETRIES) {
+      if (networkError) throw new SimulatorError('Cannot reach NHS-SIM. Check your network and retry.', 504);
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, UPSTREAM_RETRY_DELAY_MS * attempt));
+  }
+
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    // A non-JSON body on an error response still falls through to the
+    // status-based messages below.
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) throw new SimulatorError('Invalid simulator team key.', 401);
+    if (response.status === 403) throw new SimulatorError(`Team key does not have access to this ${site} action.`, 403);
+    throw new SimulatorError(data?.error || `Simulator returned HTTP ${response.status}.`, response.status >= 400 && response.status < 600 ? response.status : 502);
+  }
+  if (!data) throw new SimulatorError('Unexpected simulator response.');
+  return data;
+}
+
+// The only write this tool performs: scheduling a community home visit via
+// NHS-SIM's `schedule_visit` action — and only after a human has reviewed
+// and confirmed the drafted title/text in the UI. As part of that same
+// confirmed action (not a separate, independently-triggered write), it also
+// sends the patient an SMS via the GP site's `messaging_action`, telling
+// them when the visit is booked for. A failure to send that SMS doesn't
+// undo or fail the booking, which already succeeded — it's reported back
+// via `notified: false` instead, so the UI can show it without risking a
+// duplicate booking from a retry.
+async function scheduleHomeVisit(key, { patientId, title, text }, idempotencyKey) {
+  const resource = await postAction(key, 'community', { type: 'schedule_visit', patientId, title, text }, idempotencyKey);
+  const booking = normalizeCommunityResource(resource);
+
+  const when = Number.isFinite(booking.startsAt)
+    ? new Date(booking.startsAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })
+    : null;
+  const body = when
+    ? `Your home visit has been booked for ${when}. Reply to this message if you have any questions.`
+    : 'Your home visit has been booked. The community team will confirm a time separately. Reply to this message if you have any questions.';
+
+  let notified = true;
+  try {
+    await postAction(
+      key,
+      'gp',
+      { type: 'messaging_action', patientId, messagingCommand: { kind: 'create', subject: 'Home visit booked', body, channel: 'sms', allowReply: true } },
+      `${idempotencyKey}-notify`
+    );
+  } catch (err) {
+    console.error(`notify-home-visit ${patientId}: ${err.message}`);
+    notified = false;
+  }
+
+  return { booking, notified };
+}
+
+const cachedDecision = createDecisionCache(evaluateDischargeNote);
 
 async function runCheck(key, patientId, discharges, resources) {
   const doc = discharges.latest.get(patientId);
@@ -190,7 +283,7 @@ async function runCheck(key, patientId, discharges, resources) {
     return { patientId, patientName: patient?.name ?? null, status: 'no-discharge-summary' };
   }
 
-  const decision = await evaluateDischargeNote({ sections: doc.data?.sections, patient });
+  const decision = await cachedDecision(key, { sections: doc.data?.sections, patient });
   const bookings = bookedCareFor(resources, patientId);
   const dischargeAt = doc.data?.sentAt ?? doc.createdAt;
   const reconciliation = reconcile(decision, bookings, dischargeAt);
@@ -294,41 +387,32 @@ async function handleCheck(req, res) {
   });
 }
 
-// One patient's failure (a sim blip that outlasted the retries, an agent
-// error) shouldn't discard everyone else's results — it's reported as its own
-// row instead of failing the whole sweep. An unexpected error (not one of our
-// own upstream/agent error types) still rethrows, so a real bug keeps
-// surfacing as a 500 rather than being silently swallowed per-patient.
-async function runCheckTolerant(key, patientId, discharges, resources) {
-  try {
-    return await runCheck(key, patientId, discharges, resources);
-  } catch (err) {
-    if (err instanceof SimulatorError || err instanceof AgentError) {
-      console.error(`Sweep check failed for ${patientId}: ${err.message}`);
-      return { patientId, patientName: discharges.patients.get(patientId)?.name ?? null, status: 'check-failed', error: err.message };
+async function handleBookHomeVisit(req, res) {
+  return withKey(req, res, async (key, payload) => {
+    const patientId = typeof payload.patientId === 'string' ? payload.patientId.trim() : '';
+    const title = typeof payload.title === 'string' ? payload.title.trim() : '';
+    const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+    const idempotencyKey = typeof payload.idempotencyKey === 'string' ? payload.idempotencyKey.trim() : '';
+    if (!patientId || !title || !idempotencyKey) {
+      return sendJson(res, 400, { error: 'patientId, title, and idempotencyKey are required.' });
     }
-    throw err;
-  }
+    const { booking, notified } = await scheduleHomeVisit(key, { patientId, title, text }, idempotencyKey);
+    return sendJson(res, 200, { booking, notified });
+  });
 }
 
 async function handleSweep(req, res) {
   return withKey(req, res, async (key) => {
-    const discharges = await hospitalDischarges(key);
-    // Fetched once for the whole sweep, not per patient — the same community
-    // view would otherwise be refetched dozens of times over, which both
-    // wastes requests and widens the window a transient sim blip can land in.
-    const resources = await communityResources(key);
-    const patientIds = [...discharges.latest.keys()];
-    const results = [];
-    for (let offset = 0; offset < patientIds.length; offset += SWEEP_CONCURRENCY) {
-      const batch = await Promise.all(
-        patientIds
-          .slice(offset, offset + SWEEP_CONCURRENCY)
-          .map((patientId) => runCheckTolerant(key, patientId, discharges, resources))
-      );
-      results.push(...batch);
+    if (!process.env.OPENAI_API_KEY) {
+      throw new AgentError('OPENAI_API_KEY is not set. Add it to .env to evaluate discharge notes.');
     }
-    return sendJson(res, 200, { results, checkedAt: Date.now() });
+    const [discharges, resources] = await Promise.all([
+      hospitalDischarges(key),
+      communityResources(key),
+    ]);
+    const results = await checkSweep([...discharges.latest.keys()],
+      (patientId) => runCheck(key, patientId, discharges, resources));
+    return sendJson(res, 200, { results });
   });
 }
 
@@ -362,8 +446,9 @@ async function handleStatic(req, res, pathname) {
 
 const ROUTES = {
   '/api/connect': handleConnect,
-  '/api/check': handleCheck,
   '/api/sweep': handleSweep,
+  '/api/check': handleCheck,
+  '/api/book-home-visit': handleBookHomeVisit,
 };
 
 const server = createServer(async (req, res) => {

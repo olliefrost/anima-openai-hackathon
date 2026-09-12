@@ -7,7 +7,7 @@
     "build": "vite build --config dashboard/vite.config.js",
     "preview": "vite preview --config dashboard/vite.config.js",
     "start": "PORT=3000 node dashboard/server.js",
-    "test": "node --test dashboard/src/model.test.js"
+    "test": "node --test dashboard/src/model.test.js dashboard/sweep.test.js"
   },
   "dependencies": {
     "@animahealth/adk": "^0.6.0",
