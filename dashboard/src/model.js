@@ -28,6 +28,12 @@ const careTypeKeywords = {
   'medication-review': ['medication review', 'medicines review', 'pharmacist review'],
 };
 
+// Keyword matching only sees whatever text NHS-SIM records for a booking.
+// A manually scheduled community visit can have a title as bare as "moni" or
+// "hi" (seen in live testing) with no clinical detail at all — that will
+// legitimately fail every keyword set even when it's the right care type.
+// This is a known precision limit of text matching, not a bug to "fix" by
+// guessing; see the `review` fallback below for how ambiguous cases surface.
 function bookingText(booking) {
   return [booking.title, booking.kind, booking.status, JSON.stringify(booking.data || {})]
     .filter(Boolean)
@@ -58,6 +64,10 @@ export function reconcile(decision, bookings, dischargeAt) {
     return { status: 'ok', reason: 'No follow-on community care identified as needed from the discharge note.' };
   }
 
+  // A booking or the discharge note can be missing a usable timestamp (NHS-SIM
+  // doesn't guarantee one on every resource). Treat "unknown" as "can't prove
+  // it was before discharge" rather than excluding it — the guardrail here is
+  // to under-flag on missing data, not to over-flag on it.
   const postDischarge = bookings.filter(
     (booking) => !Number.isFinite(dischargeAt) || !Number.isFinite(booking.startsAt) || booking.startsAt >= dischargeAt
   );
@@ -66,6 +76,12 @@ export function reconcile(decision, bookings, dischargeAt) {
     return { status: 'flag', reason: `Discharge note calls for ${decision.careType || 'follow-up care'}, but no community booking was found after discharge.` };
   }
 
+  // `matchesCareType` returns true, false, or null (unverifiable) per booking.
+  // Any confirmed match is enough to call it ok; only when every booking is a
+  // *confirmed* non-match do we flag a gap. A `null` in the mix (an
+  // unverifiable care type, or — see `bookingText` above — a booking whose
+  // title just doesn't say enough) means neither "ok" nor "flag" is honest,
+  // so it falls through to "review" instead of guessing either way.
   const checks = postDischarge.map((booking) => matchesCareType(booking, decision.careType));
 
   if (checks.some((check) => check === true)) {

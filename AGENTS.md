@@ -20,6 +20,12 @@ Careloop is **read-only**: it never books, cancels, or edits a NHS-SIM
 record, and it never contacts community services directly. Its output is a
 worklist for a human to review, not an automated action.
 
+This end-to-end flow has been run live against NHS-SIM and a real OpenAI
+model (not just unit-tested): fetch discharge note → agent decision → fetch
+booked care → reconcile, producing correct `ok`/`flag`/`review` outcomes for
+distinct patients. See the API and agent notes below for the two real bugs
+that surfaced during that check and how they were fixed.
+
 ## Tech stack
 
 | Layer | Technology | Where |
@@ -146,16 +152,33 @@ any write call).
   `data.sections` is the free text this tool structures. The same documents
   are mirrored to `gp` (`visibleTo` includes `"gp"`), but this tool reads
   them from `hospital` since that's the authoring site.
+- **A patient can have more than one discharge document** — a seeded example
+  alongside a batch-generated one, with different `id`s. Confirmed live: one
+  patient had a `version: 1` document sent ~47 hours *after* a `version: 2`
+  document. These are independent episodes, not edits of one record, so
+  `version` does not track recency — `hospitalDischarges()` in `server.js`
+  picks the latest by `data.sentAt`/`createdAt` instead. Don't reintroduce a
+  version-based "latest" comparison here.
 - **`patients` on that same response** carries the demographic context this
   tool passes to the agent: `{ id, name, birthDate, conditions, needs, goals,
   localIds }`. Use it instead of a second patient lookup when possible.
-- **`GET /api/sites/community/view`** (paged, `offset`/`limit`) and
-  **`GET /api/sites/community/appointments`** (`{ appointments, patients,
-  sessions }`) are the two sources this tool reads for "what's actually
-  booked." Neither has a fixed `kind` string for a booked visit in the data
-  seen so far — reconciliation matches on booking title/kind text via
-  keywords in `model.js`, not an exact enum, and treats an unrecognised
-  match as "needs review" rather than guessing.
+- **`GET /api/sites/community/view`** (paged, `offset`/`limit`) is what this
+  tool reads for "what's actually booked" — confirmed live to contain
+  patient-linked `visit`, `care-plan`, and `care-package` resources (also
+  `observation`, `device`, `message`, `bed`, `capacity` — filtered out by
+  `patientId`, not by `kind`, since a discharge note can call for any of
+  them). **`GET /api/sites/community/appointments` is not a per-patient
+  booking list** despite the name — it 400s with `"A valid date is
+  required"` and returns one day's slot-capacity schedule
+  (`{ appointments, patients, sessions }`) for whatever `date` you pass, not
+  a patient's bookings. Don't add it back to `bookedCareFor()`.
+- Booking titles can be free text with no clinical detail at all — confirmed
+  live titles like `"moni"` and `"hi"` from manually scheduled test visits.
+  Reconciliation matches on booking title/kind text via keywords in
+  `model.js`, not an exact `kind` enum, and treats an unrecognised match as
+  "needs review" rather than guessing — this also means a real match can be
+  under-detected when the title is this terse. That's a known precision
+  limit of text matching, not a bug to silently "fix" by guessing.
 - **`GET /api/sites/{site}/patients?q=<id>&offset=0`** — patient search/read,
   used as a fallback when a patient isn't in the discharge-documents response.
 - **Available but unused by this tool**: `referrals` site / `GET
@@ -170,6 +193,24 @@ any write call).
 - World state resets are possible between hackathon sessions — sample IDs
   above (e.g. `SIM-000001`) may not exist in every world; always resolve
   patients by whatever your connected team's `/api/team` world actually has.
+
+## Anima ADK usage notes (handoff notes)
+
+- **`app.agent({ context: [...] })` needs `app.context.history()`, not just
+  `app.context.system(...)`.** The system prompt alone does not include
+  whatever you pass to `app.run(agent, prompt)` — without `history()` in the
+  context array, the model never sees the prompt at all. Confirmed live: the
+  agent consistently replied "no discharge note was provided" until
+  `app.context.history()` was added to `dashboard/careAgent.js`. Any new
+  ADK agent in this repo needs both.
+- **`output: { schema }` still needs re-validation on the result.** ADK's
+  structured output runs through a "forgiving" parser (coercion, partial
+  matches), so `result.output.value` isn't a hard-guaranteed match for the
+  zod schema — `careAgent.js` calls `decisionSchema.safeParse(...)` before
+  trusting it, and that's the actual boundary check, not the `output` config.
+- `app.run(agent, promptString)` (the string shorthand) is what this tool
+  uses — no need for the `{ input: { message, state } }` form unless you
+  need session state.
 
 ## Clinical-product guardrails
 
@@ -203,9 +244,14 @@ data supports:
 - For UI or server changes, also start `npm run dev` and manually verify the
   single-patient check and the full sweep at desktop and narrow viewport
   widths.
-- When changing simulator integration, verify invalid credentials, a missing
-  discharge summary, a missing `OPENAI_API_KEY`, and a successful check,
-  without logging secrets or patient payloads.
+- When changing simulator or agent integration, don't stop at unit tests —
+  run an actual `/api/check` against a real patient ID with a real
+  `SIM_API_KEY` and `OPENAI_API_KEY` and read the response. Unit tests
+  can't catch a wrong upstream endpoint (see the `community/appointments`
+  note above) or a misconfigured agent context (see the ADK notes above);
+  both passed every unit test while silently returning wrong or empty
+  results. Also verify invalid credentials, a missing discharge summary, and
+  a missing `OPENAI_API_KEY`, without logging secrets or patient payloads.
 
 ## Documentation
 
