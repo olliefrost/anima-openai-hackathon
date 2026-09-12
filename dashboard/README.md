@@ -9,9 +9,9 @@ npm run dev
 
 Then open http://localhost:5173. Vite serves the React frontend and proxies `/api` requests to the Node API on http://localhost:8000.
 
-The dashboard starts with explicitly labelled synthetic demo records. Click **Connect simulator** and enter your NHS-SIM team API key, or set `SIM_API_KEY` in the root `.env` and submit the connection form with its key field empty. This is separate from `OPENAI_API_KEY`.
+The dashboard starts empty. Click **Connect simulator** and enter your NHS-SIM team API key, or set `SIM_API_KEY` in the root `.env` and submit the connection form with its key field empty. This is separate from `OPENAI_API_KEY`.
 
-The local Node server calls the documented read-only NHS-SIM `/api/team`, `/api/sites/{site}/view`, and `/api/sites/{site}/patients` endpoints for GP, pharmacy, and community care. It loads up to the API maximum of 500 resources per service and labels a service when more history exists; resource IDs in that working set are deduplicated by version. Failed sources are reported individually, and no sample data is mixed into live results. Credentials remain in memory or the server environment, never browser storage.
+The local Node server calls the documented read-only NHS-SIM `/api/team`, `/api/sites/{site}/view`, and `/api/sites/{site}/patients` endpoints for GP, pharmacy, and community care. It loads up to the API maximum of 500 resources per service and labels a service when more history exists; resource IDs in that working set are deduplicated by version. Failed sources are reported individually. Credentials remain in memory or the server environment, never browser storage.
 
 Review flags and notes are saved in this browser, separated by simulator world. They do not update source records or mark clinical work completed. Refresh manually to fetch changes. Due dates use the simulator clock; undated open items older than 48 hours are labelled for review as a heuristic. Missing records or handoffs cannot be proven from these signals. Only patient-linked records appear in the worklist. Shared resources count once globally but in every service where visible.
 

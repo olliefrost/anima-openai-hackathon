@@ -3,33 +3,6 @@ import { aggregate, sites } from './model.js';
 
 const names = { gp: 'GP practice', pharmacy: 'Pharmacy', community: 'Community care' };
 const icons = { gp: '✚', pharmacy: '↗', community: '⌂' };
-const demoNow = Date.UTC(2026, 8, 12, 12);
-const patientNames = ['Margaret Wilson', 'James Bennett', 'Aisha Patel', 'Robert Clarke', 'Eleanor Hughes', 'David Thompson', 'Sarah O’Neill', 'Peter Evans'];
-const demoPatients = patientNames.map((name, index) => ({ id: `SIM-${String(index + 1).padStart(6, '0')}`, name }));
-const examples = [
-  ['pharmacy', 'Repeat prescription · Amlodipine', 'awaiting-stock', 0, -26, 'prescription'],
-  ['community', 'Post-discharge home visit', 'scheduled', 1, -19, 'visit'],
-  ['gp', 'Medication review following discharge', 'pending', 2, -8, 'task'],
-  ['pharmacy', 'Prescription ready for collection', 'ready', 3, -4, 'prescription'],
-  ['community', 'Wound dressing visit', 'unassigned', 4, 3, 'visit'],
-  ['gp', 'Blood test follow-up', 'pending', 5, 5, 'task'],
-  ['pharmacy', 'Repeat prescription request', 'received', 6, 9, 'prescription'],
-  ['community', 'Mobility assessment', 'awaiting-booking', 7, null, 'referral'],
-  ['gp', 'Review community care update', 'pending', 1, 24, 'task'],
-  ['gp', 'Repeat prescription authorised', 'completed', 0, -32, 'task'],
-  ['community', 'Discharge handover received', 'completed', 2, -24, 'handover'],
-  ['pharmacy', 'Antibiotic prescription', 'collected', 5, -18, 'prescription'],
-];
-const demoSources = sites.map(site => ({
-  site,
-  now: demoNow,
-  patients: demoPatients,
-  resources: examples.flatMap(([owner, title, status, patient, offset, kind], index) => owner === site ? [{
-    id: `DEMO-${index}`, patientId: demoPatients[patient].id, title, status, owner, kind, version: 1,
-    createdAt: demoNow - 72 * 3600000, ...(offset === null ? {} : { dueAt: demoNow + offset * 3600000 }),
-    priority: index < 3 ? 'urgent' : 'routine', data: { note: 'Illustrative sample record, not fetched from your simulator.' }, visibleTo: [owner],
-  }] : []),
-}));
 
 function formatDate(timestamp) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
@@ -106,13 +79,13 @@ export default function App() {
   const [view, setView] = useState('all');
   const [service, setService] = useState('all');
   const [search, setSearch] = useState('');
-  const [sources, setSources] = useState(demoSources);
-  const [now, setNow] = useState(demoNow);
+  const [sources, setSources] = useState([]);
+  const [now, setNow] = useState(() => Date.now());
   const [live, setLive] = useState(false);
-  const [namespace, setNamespace] = useState('demo');
+  const [namespace, setNamespace] = useState('');
   const [key, setKey] = useState('');
-  const [flags, setFlags] = useState(() => readFlags('demo')[0]);
-  const [storageWarning, setStorageWarning] = useState(() => readFlags('demo')[1]);
+  const [flags, setFlags] = useState({});
+  const [storageWarning, setStorageWarning] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [connectError, setConnectError] = useState('');
@@ -186,14 +159,16 @@ export default function App() {
     <main>
       <header><div className="breadcrumb">Workspace <span>/</span> Care overview</div><button className="button" onClick={showConnection}>{live ? 'Connected · change key' : 'Connect simulator ↗'}</button></header>
       <section className="heading"><div><div className="eyebrow">CONTINUITY OF CARE</div><h1>Nothing slips through.</h1><p>One place to spot pending care and close the loop.</p></div><button className="button" disabled={loading} onClick={() => live ? connect(key) : showConnection()}>{loading ? '↻ Syncing…' : '↻ Refresh data'}</button></section>
-      <div className="notice" role="status">{live ? <><span className="connection-dot" /> Connected to <strong>{namespace}</strong> · Simulator time {formatDate(now)}{sources.some(source => source.error || source.truncated) && <> · <strong>Partial data — check service status below</strong></>}</> : <><span className="demo-pill">DEMO</span> Exploring sample data. Connect your NHS-SIM team to see your own care records.</>}{storageWarning && ' · Browser storage unavailable; flags may not persist.'}</div>
+      <div className="notice" role="status">{live ? <><span className="connection-dot" /> Connected to <strong>{namespace}</strong> · Simulator time {formatDate(now)}{sources.some(source => source.error || source.truncated) && <> · <strong>Partial data — check service status below</strong></>}</> : 'Not connected. Connect your NHS-SIM team to see care records.'}{storageWarning && ' · Browser storage unavailable; flags may not persist.'}</div>
       <section className="metrics" aria-label="Worklist summary">{metrics.map(([label, count, subtitle, metricView], index) => <button key={label} className={`metric m${index} ${view === metricView ? 'selected' : ''}`} onClick={() => setView(metricView)}><span>{label}<b>{['↗', '◷', '!', '⚑'][index]}</b></span><strong>{count}</strong><small>{subtitle}</small></button>)}</section>
-      <section className="sources" aria-label="Service sources">{sources.map(source => <button key={source.site} className={`source ${service === source.site ? 'chosen' : ''}`} onClick={() => setService(service === source.site ? 'all' : source.site)}><span className={`source-icon ${source.site}`}>{icons[source.site]}</span><div><strong>{names[source.site]}</strong><small>{source.error || `${pending.filter(record => record.seenIn.includes(source.site)).length} pending · ${live ? source.truncated ? `Latest ${source.resources.length} of ${source.resourceTotal}` : 'Synced' : 'Sample data'}`}</small></div><span className={`source-status ${source.error ? 'failed' : ''}`}>{source.error ? '!' : '●'}</span></button>)}</section>
+      <section className="sources" aria-label="Service sources">{sources.map(source => <button key={source.site} className={`source ${service === source.site ? 'chosen' : ''}`} onClick={() => setService(service === source.site ? 'all' : source.site)}><span className={`source-icon ${source.site}`}>{icons[source.site]}</span><div><strong>{names[source.site]}</strong><small>{source.error || `${pending.filter(record => record.seenIn.includes(source.site)).length} pending · ${source.truncated ? `Latest ${source.resources.length} of ${source.resourceTotal}` : 'Synced'}`}</small></div><span className={`source-status ${source.error ? 'failed' : ''}`}>{source.error ? '!' : '●'}</span></button>)}</section>
       <section className="worklist">
         <div className="section-title"><div><h2>Care worklist <span>{filtered.length}</span></h2><p>Follow the handoff. Find what needs a nudge.</p></div><div className="legend"><i /> Potential gap, for review</div></div>
         <div className="controls"><div className="tabs" role="group" aria-label="Worklist status">{[['all', 'All pending'], ['attention', 'Needs attention'], ['flagged', 'Flagged'], ['complete', 'Completed']].map(([value, label]) => <button key={value} className={view === value ? 'selected' : ''} onClick={() => setView(value)}>{label}</button>)}</div><div className="filters"><input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search patient or task…" aria-label="Search patient or task" /><select value={service} onChange={event => setService(event.target.value)} aria-label="Filter service"><option value="all">All services</option>{sites.map(site => <option key={site} value={site}>{names[site]}</option>)}</select></div></div>
         <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Task &amp; handoff</th><th>Service</th><th>Status</th><th>Due</th><th><span className="sr-only">Review</span></th></tr></thead><tbody>{filtered.map(record => { const patient = patientMap.get(record.patientId); const name = patient?.name || record.patientId; const initials = name.split(' ').slice(0, 2).map(part => part[0]).join(''); return <tr key={record.id}><td><button className="patient-button" onClick={() => showDetail(record.id)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{record.patientId}</small></span></button></td><td><button className="task-button" onClick={() => showDetail(record.id)}>{record.title}</button><small>{record.reason}</small></td><td><span className="service-label">{names[record.owner] || record.owner || 'Unassigned'}</span><small>{record.seenIn.length > 1 ? `Visible in ${record.seenIn.length} services` : record.kind.replaceAll('_', ' ')}</small></td><td><span className={`badge ${record.done ? 'green' : record.attention ? 'amber' : ''}`}>{recordStatus(record)}</span></td><td className={`due ${record.overdue ? 'late' : ''}`}>{dueLabel(record, now)}</td><td><button className={`flag ${flags[record.id] ? 'is-flagged' : ''}`} onClick={() => toggleFlag(record.id)} aria-label={`${flags[record.id] ? 'Unflag' : 'Flag'} ${record.title}`} aria-pressed={Boolean(flags[record.id])}>⚑</button></td></tr>; })}</tbody></table></div>
-        {filtered.length === 0 && <div className="empty">No matching items.<p>Try a different filter or search.</p></div>}
+        {filtered.length === 0 && (live
+          ? <div className="empty">No matching items.<p>Try a different filter or search.</p></div>
+          : <div className="empty">Not connected.<p>Connect your NHS-SIM team to see care records.</p></div>)}
         <footer className="table-footer"><span>Showing {filtered.length} of {records.length} patient-linked records</span><span>Flags are saved on this browser · source records stay unchanged</span></footer>
       </section>
       <p className="footnote">NHS-SIM synthetic data · Overdue uses the simulator clock. An open item without a due time is highlighted after 48 hours. These signals suggest review, not a confirmed care omission.</p>
