@@ -2,8 +2,8 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { reconcile } from './src/model.js';
-import { evaluateDischargeNote, AgentError } from './careAgent.js';
+import { reconcile, bookingsToEvaluate } from './src/model.js';
+import { evaluateDischargeNote, evaluateCareMatch, AgentError } from './careAgent.js';
 import { checkSweep, createDecisionCache } from './sweep.js';
 
 const DASHBOARD = path.dirname(fileURLToPath(import.meta.url));
@@ -290,7 +290,10 @@ async function runCheck(key, patientId, discharges, resources) {
   const decision = await cachedDecision(key, { sections: doc.data?.sections, patient });
   const bookings = bookedCareFor(resources, patientId);
   const dischargeAt = doc.data?.sentAt ?? doc.createdAt;
-  const reconciliation = reconcile(decision, bookings, dischargeAt);
+  const toEvaluate = bookingsToEvaluate(decision, bookings, dischargeAt);
+  const verdicts = await evaluateCareMatch({ careType: decision.careType, rationale: decision.rationale, bookings: toEvaluate });
+  const matchVerdicts = new Map(verdicts.map((verdict) => [verdict.id, verdict]));
+  const reconciliation = reconcile(decision, bookings, dischargeAt, matchVerdicts);
 
   return {
     patientId,

@@ -106,7 +106,7 @@ These apply to every change in this repository:
 - `dashboard/index.html` — Vite HTML entrypoint.
 - `dashboard/style.css` — all dashboard styling and responsive rules.
 - `dashboard/src/App.jsx` — React UI: connect to a team, check one patient by ID, view the discharge summary/original note/decision, and — for a home-visit gap — review, edit, and confirm a booking.
-- `dashboard/src/model.js` — pure reconciliation rules (`reconcile`, `matchesCareType`) and the `careTypes` vocabulary. Still covers all 8 care types even though only home-visit is bookable from the UI — the agent needs the full vocabulary to classify a note correctly.
+- `dashboard/src/model.js` — pure reconciliation rules (`reconcile`, `bookingsToEvaluate`, `evaluateBookings`) and the `careTypes` vocabulary. Still covers all 8 care types even though only home-visit is bookable from the UI — the agent needs the full vocabulary to classify a note correctly.
 - `dashboard/src/model.test.js` — Node test coverage for the reconciliation rules.
 - `dashboard/vite.config.js` — Vite build and Node development proxy.
 - `dashboard/server.js` — loopback-only Node static server, the read-only NHS-SIM proxy (`/api/connect`, `/api/check`), and the one write route, `/api/book-home-visit`, gated on an explicit UI confirmation — it both schedules the visit and sends the patient a confirmation SMS as one operation.
@@ -235,11 +235,11 @@ reference: `GET /api/catalogue`, human docs at `/docs/explorer/`, OpenAPI at
   a patient's bookings. Don't add it back to `bookedCareFor()`.
 - Booking titles can be free text with no clinical detail at all — confirmed
   live titles like `"moni"` and `"hi"` from manually scheduled test visits.
-  Reconciliation matches on booking title/kind text via keywords in
-  `model.js`, not an exact `kind` enum, and treats an unrecognised match as
-  "needs review" rather than guessing — this also means a real match can be
-  under-detected when the title is this terse. That's a known precision
-  limit of text matching, not a bug to silently "fix" by guessing.
+  Reconciliation uses a second ADK agent (`evaluateCareMatch` in
+  `careAgent.js`) to return a matches/no-match/ambiguous verdict and reason
+  per eligible booking. Too-terse evidence must remain ambiguous. One match
+  is enough for ok; all non-matches yield flag; otherwise review. These are
+  judgments for human review, not proof of delivered or omitted care.
 - **`GET /api/sites/{site}/patients?q=<id>&offset=0`** — patient search/read,
   used as a fallback when a patient isn't in the discharge-documents response.
 - **Available but unused by this tool**: `referrals` site / `GET
@@ -302,7 +302,7 @@ data supports:
   Reconciliation surfaces this as "needs review," not as a false match or a
   false gap.
 - A care type that can't be checked against booked-care text with
-  reasonable confidence (see `matchesCareType` in `model.js`) must also
+  reasonable confidence (see `evaluateCareMatch` in `careAgent.js`) must also
   reconcile to "needs review," never a claimed "match."
 - Missing a matching community booking does not prove a handoff failed —
   only that this tool couldn't find one. Phrase flags as something to check,
@@ -371,3 +371,23 @@ data supports:
 Update `dashboard/README.md` when setup, environment variables, routes,
 user-visible heuristics, privacy behavior, or operating limitations change.
 Keep instructions runnable from the repository root.
+
+## Agent matching and current flow
+
+The care-decision and care-booking-match agents share one ADK app, each with
+system context, history, and revalidated structured output. Keep agent I/O in
+`careAgent.js`; reconciliation consumes a fixed verdict Map and stays pure.
+The matcher sees only the decided care type, rationale, and eligible bookings,
+not the raw discharge note. Validate exactly one verdict per input booking ID.
+Skip matching for ambiguous decisions, no care needed, no care type, or no
+eligible bookings. Missing timestamps are not proof of a pre-discharge booking.
+
+Current main has restored `/api/sweep`: twelve concurrent patient checks share
+fresh hospital/community reads. Only filed summaries qualify. The five-minute
+team-isolated decision cache remains; booking matches run fresh on each check.
+The editable home-visit draft and confirmed booking/SMS operation remain intact.
+An ambiguous booking match yields review and must not offer a booking form.
+
+Update [`flow.md`](./flow.md) whenever routes, call ordering, decision branches,
+or retry/error behavior change. Test reconciliation with fixed verdict Maps,
+including mixed, ambiguous, and missing verdicts; verify agent integration live.

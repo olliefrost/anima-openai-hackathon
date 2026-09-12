@@ -53,7 +53,7 @@ Enter a patient ID (e.g. `SIM-000001`) and Careloop:
    whether it matches the decision: **Matches**, **Flagged** (care needed,
    nothing matching booked after discharge), or **Needs review** (an
    ambiguous decision, or a booked care type that can't be confidently
-   matched by text).
+   matched by the care-match agent).
 
 The care-decision detail is not displayed. A compact **Full discharge summary
 letter** disclosure expands to show every raw note section together (Reason
@@ -61,11 +61,20 @@ for admission, Hospital course, Results, Diagnoses, Medication changes,
 Follow-up, GP actions). NHS-SIM's camelCase keys are reformatted into these
 readable headings.
 
-Care-type matching against bookings is text-based (keywords against a
-booking's title/kind), not exact. A manually scheduled visit with a title
-like "home visit follow-up" matches; one titled just "hi" or "moni" — real
-examples from NHS-SIM test data — won't, even if it's the right visit. Treat
-a **Flagged** result as "worth a human look," not a confirmed miss.
+Care matching uses a second ADK agent, given the decided care type and rationale
+plus each eligible booking's title, kind, status, and details. It returns a
+`matches`, `no-match`, or `ambiguous` verdict and a reason for each booking.
+The matcher does not see the raw discharge note. Terse titles such as "hi" or
+"moni" should produce ambiguity when the remaining details cannot establish a
+match. One confirmed match is enough for **Matches**; all confirmed non-matches
+produce **Flagged**; otherwise the result is **Needs review**. Missing verdicts
+cannot count as matches. Treat these judgments as prompts for human review.
+
+Only bookings not provably before discharge are evaluated, and only when care
+is needed, the decision is unambiguous, and a care type is present. Match
+verdicts are evaluated afresh even when the discharge decision is cached, so
+repeat checks with eligible bookings still make a model call. Both agents use
+the server-side `OPENAI_API_KEY`. See [the full sequence](../flow.md).
 
 ## Booking a home visit
 

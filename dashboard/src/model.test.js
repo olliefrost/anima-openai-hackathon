@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reconcile, matchesCareType, matchExplanation, evaluateBookings, urgencyLabel } from './model.js';
+import { reconcile, bookingsToEvaluate, evaluateBookings, urgencyLabel } from './model.js';
 
 const day = 24 * 3600000;
 const dischargeAt = 100 * day;
+
+function verdictMap(entries) {
+  return new Map(entries.map(([id, verdict, reason = 'stub reason']) => [id, { verdict, reason }]));
+}
 
 test('an ambiguous decision always needs review, regardless of bookings', () => {
   const result = reconcile({ ambiguous: true, careNeeded: true, careType: 'home-visit' }, [], dischargeAt);
@@ -21,43 +25,56 @@ test('care needed but nothing booked after discharge is flagged', () => {
   assert.equal(result.status, 'flag');
 });
 
-test('care needed and a matching post-discharge booking is ok', () => {
+test('care needed and an agent-confirmed matching post-discharge booking is ok', () => {
   const booking = { id: 'b2', title: 'District nursing wound care', kind: 'appointment', startsAt: dischargeAt + day };
-  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'district-nursing' }, [booking], dischargeAt);
+  const matchVerdicts = verdictMap([['b2', 'matches', 'Booking is a district nursing wound-care visit.']]);
+  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'district-nursing' }, [booking], dischargeAt, matchVerdicts);
   assert.equal(result.status, 'ok');
 });
 
-test('care needed but the only booking is a different care type is flagged', () => {
+test('care needed but the agent confirms the only booking is a different care type, so it is flagged', () => {
   const booking = { id: 'b3', title: 'Physiotherapy session', kind: 'appointment', startsAt: dischargeAt + day };
-  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt);
+  const matchVerdicts = verdictMap([['b3', 'no-match', 'Booking is physiotherapy, not a home visit.']]);
+  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt, matchVerdicts);
   assert.equal(result.status, 'flag');
 });
 
-test('an unverifiable care type ("other") with a booking present needs review, not a claimed match', () => {
-  const booking = { id: 'b4', title: 'Community follow-up', kind: 'appointment', startsAt: dischargeAt + day };
-  assert.equal(matchesCareType(booking, 'other'), null);
-  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'other' }, [booking], dischargeAt);
-  assert.equal(result.status, 'review');
-  // The reason itself must say *why*: "other" has no keyword set to check
-  // against, not "the booking text didn't say enough" — those are different
-  // causes and a reviewer shouldn't have to dig into bookingEvaluations to
-  // tell them apart.
-  assert.match(result.reason, /no defined keyword set/);
-});
-
-test('a checkable care type with too-terse booking text is a confirmed non-match, not "review"', () => {
+test('an agent-ambiguous verdict on a too-terse booking needs review, not a claimed match or flag', () => {
   // "hi" is a real example of a bare NHS-SIM booking title (see AGENTS.md) —
-  // it fails every keyword check, same as a genuinely unrelated booking. That
-  // under-detection is a known precision limit of text matching, not a case
-  // this tool can distinguish from "flag" without guessing.
-  const booking = { id: 'b4b', title: 'hi', kind: 'appointment', startsAt: dischargeAt + day };
-  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt);
-  assert.equal(result.status, 'flag');
+  // too terse for the care-match agent to confidently say either way.
+  const booking = { id: 'b4', title: 'hi', kind: 'appointment', startsAt: dischargeAt + day };
+  const matchVerdicts = verdictMap([['b4', 'ambiguous', 'Title "hi" gives no detail on what care was delivered.']]);
+  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt, matchVerdicts);
+  assert.equal(result.status, 'review');
+  assert.match(result.reason, /could not be confidently matched/);
+});
+
+test('a mix of a confirmed non-match and an ambiguous verdict (no confirmed match) needs review, not a flag', () => {
+  const noMatch = { id: 'b5a', title: 'Physiotherapy session', kind: 'appointment', startsAt: dischargeAt + day };
+  const ambiguous = { id: 'b5b', title: 'visit', kind: 'appointment', startsAt: dischargeAt + day };
+  const matchVerdicts = verdictMap([
+    ['b5a', 'no-match', 'Physiotherapy does not deliver a home visit.'],
+    ['b5b', 'ambiguous', 'Title "visit" gives no detail.'],
+  ]);
+  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [noMatch, ambiguous], dischargeAt, matchVerdicts);
+  assert.equal(result.status, 'review');
+});
+
+test('one confirmed match among other bookings is still ok, even with a non-match alongside it', () => {
+  const matching = { id: 'b6a', title: 'Home visit follow-up', kind: 'appointment', startsAt: dischargeAt + day };
+  const notMatching = { id: 'b6b', title: 'Physiotherapy session', kind: 'appointment', startsAt: dischargeAt + day };
+  const matchVerdicts = verdictMap([
+    ['b6a', 'matches', 'Booking is a home visit follow-up.'],
+    ['b6b', 'no-match', 'Physiotherapy does not deliver a home visit.'],
+  ]);
+  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [matching, notMatching], dischargeAt, matchVerdicts);
+  assert.equal(result.status, 'ok');
 });
 
 test('a booking with no recorded start time is treated as not provably before discharge', () => {
-  const booking = { id: 'b5', title: 'Home visit', kind: 'appointment', startsAt: undefined };
-  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt);
+  const booking = { id: 'b7', title: 'Home visit', kind: 'appointment', startsAt: undefined };
+  const matchVerdicts = verdictMap([['b7', 'matches', 'Booking is a home visit.']]);
+  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt, matchVerdicts);
   assert.equal(result.status, 'ok');
 });
 
@@ -78,8 +95,9 @@ test('urgency score ranks clinical urgency above confirmation certainty', () => 
 });
 
 test('a match has no urgency score even when the note itself was urgent', () => {
-  const booking = { id: 'b6', title: 'Home visit', kind: 'appointment', startsAt: dischargeAt + day };
-  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit', urgency: 'urgent' }, [booking], dischargeAt);
+  const booking = { id: 'b8', title: 'Home visit', kind: 'appointment', startsAt: dischargeAt + day };
+  const matchVerdicts = verdictMap([['b8', 'matches', 'Booking is a home visit.']]);
+  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit', urgency: 'urgent' }, [booking], dischargeAt, matchVerdicts);
   assert.equal(result.status, 'ok');
   assert.equal(result.urgencyScore, 0);
 });
@@ -100,32 +118,26 @@ test('reconcile explains its urgency score, not just the number', () => {
   assert.match(ok.scoreExplanation, /nothing to triage/);
 });
 
-test('matchExplanation names the keyword that matched', () => {
-  const booking = { id: 'b7', title: 'District nursing wound care', kind: 'appointment' };
-  const result = matchExplanation(booking, 'district-nursing');
-  assert.equal(result.matches, true);
-  assert.match(result.reason, /district nurs/);
+test('bookingsToEvaluate returns nothing when the decision is ambiguous or no care is needed', () => {
+  const booking = { id: 'c1', title: 'Home visit', kind: 'appointment', startsAt: dischargeAt + day };
+  assert.deepEqual(bookingsToEvaluate({ ambiguous: true, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt), []);
+  assert.deepEqual(bookingsToEvaluate({ ambiguous: false, careNeeded: false, careType: null }, [booking], dischargeAt), []);
 });
 
-test('matchExplanation says why a booking did not match', () => {
-  const booking = { id: 'b8', title: 'Physiotherapy session', kind: 'appointment' };
-  const result = matchExplanation(booking, 'home-visit');
-  assert.equal(result.matches, false);
-  assert.match(result.reason, /home-visit/);
-});
-
-test('matchExplanation says why "other" cannot be verified', () => {
-  const booking = { id: 'b9', title: 'Community follow-up', kind: 'appointment' };
-  const result = matchExplanation(booking, 'other');
-  assert.equal(result.matches, null);
-  assert.match(result.reason, /no defined keyword set/);
+test('bookingsToEvaluate excludes bookings made before discharge', () => {
+  const before = { id: 'c2', title: 'Home visit', kind: 'appointment', startsAt: dischargeAt - day };
+  const after = { id: 'c3', title: 'Home visit', kind: 'appointment', startsAt: dischargeAt + day };
+  const decision = { ambiguous: false, careNeeded: true, careType: 'home-visit' };
+  const result = bookingsToEvaluate(decision, [before, after], dischargeAt);
+  assert.deepEqual(result.map((b) => b.id), ['c3']);
 });
 
 test('evaluateBookings gives every booking a verdict, including ones the outcome does not turn on', () => {
   const priorBooking = { id: 'p1', title: 'Home visit', kind: 'appointment', startsAt: dischargeAt - day };
   const matchingBooking = { id: 'p2', title: 'Home visit follow-up', kind: 'appointment', startsAt: dischargeAt + day };
   const decision = { ambiguous: false, careNeeded: true, careType: 'home-visit' };
-  const evaluations = evaluateBookings(decision, [priorBooking, matchingBooking], dischargeAt);
+  const matchVerdicts = verdictMap([['p2', 'matches', 'Booking is a home visit follow-up.']]);
+  const evaluations = evaluateBookings(decision, [priorBooking, matchingBooking], dischargeAt, matchVerdicts);
 
   const before = evaluations.find((e) => e.id === 'p1');
   assert.equal(before.afterDischarge, false);
@@ -142,4 +154,22 @@ test('evaluateBookings marks every booking unchecked when the decision was ambig
   const evaluations = evaluateBookings({ ambiguous: true, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt);
   assert.equal(evaluations[0].matches, null);
   assert.match(evaluations[0].reason, /ambiguous/);
+});
+
+test('missing verdicts and ambiguous other care remain reviewable', () => {
+  const decision = { careNeeded: true, careType: 'other', ambiguous: false };
+  const bookings = [{ id: 'unknown', startsAt: dischargeAt }];
+  const missing = reconcile(decision, bookings, dischargeAt);
+  assert.equal(missing.status, 'review');
+  assert.equal(missing.bookingEvaluations[0].matches, null);
+  const ambiguous = reconcile(decision, bookings, dischargeAt, verdictMap([['unknown', 'ambiguous']]));
+  assert.equal(ambiguous.status, 'review');
+});
+
+test('eligibility includes equal and unknown timestamps but requires a care type', () => {
+  const decision = { careNeeded: true, careType: 'home-visit', ambiguous: false };
+  const bookings = [{ id: 'equal', startsAt: dischargeAt }, { id: 'unknown' }];
+  assert.deepEqual(bookingsToEvaluate(decision, bookings, dischargeAt), bookings);
+  assert.deepEqual(bookingsToEvaluate(decision, bookings, undefined), bookings);
+  assert.deepEqual(bookingsToEvaluate({ ...decision, careType: null }, bookings, dischargeAt), []);
 });

@@ -7,8 +7,9 @@ structure the free-text decision into "is community follow-up care needed,
 and what kind," reads what community services actually booked, and flags a
 gap when the two don't line up.
 
-Careloop is a **review aid, not a clinical decision maker** — it only reads
-NHS-SIM data and never books, cancels, or edits anything. See the guardrails
+Careloop is a **review aid, not a clinical decision maker** — it reads
+NHS-SIM data and only books a home visit and queues its confirmation SMS after
+a human explicitly confirms the editable draft. See the guardrails
 in [`AGENTS.md`](./AGENTS.md) before changing the decision or reconciliation
 logic.
 
@@ -18,7 +19,7 @@ logic.
 |---|---|
 | Frontend | React 19 + Vite 7 (`dashboard/src`) |
 | Backend | Node (built-in `http`) serving the built frontend and proxying NHS-SIM (`dashboard/server.js`) |
-| Care-decision agent | `@animahealth/adk` + an OpenAI model, structured output (`dashboard/careAgent.js`) |
+| Care-decision & care-match agents | `@animahealth/adk` + an OpenAI model, structured output (`dashboard/careAgent.js`) |
 | Domain logic | Plain JS functions, framework-free, in `dashboard/src/model.js` |
 | Tests | Node's built-in test runner (`node --test`) against `model.js` |
 | Dev orchestration | `concurrently` runs Vite and the Node server together (`npm run dev`) |
@@ -31,17 +32,18 @@ npm run dev        # Vite dev server at :5173, Node API at :8000
 ```
 
 Then open http://localhost:5173. See [`dashboard/README.md`](./dashboard/README.md)
-for full setup, environment variables, and the check/sweep flow.
+for full setup, environment variables, and the check/sweep flow. See
+[`flow.md`](./flow.md) for the call sequence, decision table, and error handling.
 
 ## Repository layout
 
 ```
 dashboard/            Careloop application (frontend + backend)
   src/App.jsx         React UI — connect, check one patient, or sweep all
-  src/model.js         Pure reconciliation and care-type matching rules
+  src/model.js         Pure reconciliation rules consuming per-booking agent verdicts
   src/model.test.js    Tests for model.js
   server.js            Loopback-only Node static server + NHS-SIM proxy + API routes
-  careAgent.js          ADK agent that structures a discharge note into a care decision
+  careAgent.js          ADK agents for discharge decisions and booking match verdicts
   README.md            Dashboard-specific setup and behavior notes
 AGENTS.md             Conventions, NHS-SIM API reference, guardrails, and commands for AI coding agents
 CLAUDE.md             Points Claude Code at AGENTS.md
