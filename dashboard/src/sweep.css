@@ -1,0 +1,71 @@
+.sweep-patient {
+  width: 100%;
+  padding: 13px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.sweep-patient:hover {
+  filter: brightness(.985);
+  box-shadow: 0 2px 7px #223f3014;
+}
+
+.sweep-patient.flagged {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.sweep-patient.review {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.sweep-patient.ok {
+  border-color: #cfe4d7;
+  background: #f2f8f4;
+}
+
+.sweep-patient strong,
+.sweep-patient small,
+.sweep-patient .hint {
+  display: block;
+}
+
+.sweep-patient small {
+  color: #7b8981;
+  font-size: 10px;
+  margin-top: 3px;
+}
+
+.sweep-patient .hint {
+  margin: 7px 0 0;
+}
+
+.sweep-patient-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+@media (max-width: 800px) {
+  .sweep-patient {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .sweep-patient-meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+}

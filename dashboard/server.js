@@ -116,27 +116,32 @@ async function upstream(key, apiPath, params = {}) {
   return data;
 }
 
-// Latest discharge-summary document per patient, plus the patient directory
+// Latest filed discharge-summary document per patient, plus the patient directory
 // the hospital returned alongside those documents.
-async function hospitalDischarges(key) {
-  const view = await upstream(key, '/api/sites/hospital/documents', { offset: 0, limit: 500 });
-  if (!Array.isArray(view.resources)) {
-    throw new SimulatorError('Unexpected simulator response.');
-  }
-  const patients = new Map((view.patients || []).map((patient) => [patient.id, patient]));
+function latestFiledDischarges(resources) {
   // A patient can have more than one discharge episode (different `id`s, e.g. a
   // seeded example alongside a batch-generated one) — these are separate documents,
   // not edits of one record, so `version` doesn't track which happened more recently.
   // Compare by when the note was actually sent instead.
   const dischargeTime = (doc) => doc.data?.sentAt ?? doc.createdAt ?? 0;
   const latest = new Map();
-  for (const doc of view.resources) {
-    if (doc.kind !== 'discharge-summary' || !doc.patientId) continue;
+  for (const doc of resources) {
+    if (doc.kind !== 'discharge-summary' || doc.status !== 'filed' || !doc.patientId) continue;
     const prior = latest.get(doc.patientId);
     if (!prior || dischargeTime(doc) > dischargeTime(prior)) {
       latest.set(doc.patientId, doc);
     }
   }
+  return latest;
+}
+
+async function hospitalDischarges(key) {
+  const view = await upstream(key, '/api/sites/hospital/documents', { offset: 0, limit: 500 });
+  if (!Array.isArray(view.resources)) {
+    throw new SimulatorError('Unexpected simulator response.');
+  }
+  const patients = new Map((view.patients || []).map((patient) => [patient.id, patient]));
+  const latest = latestFiledDischarges(view.resources);
   return { latest, patients };
 }
 
@@ -201,14 +206,13 @@ async function postAction(key, site, body, idempotencyKey) {
       'Idempotency-Key': idempotencyKey,
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
   };
 
   let response;
   for (let attempt = 1; attempt <= UPSTREAM_RETRIES; attempt++) {
     let networkError = false;
     try {
-      response = await fetch(url, requestInit);
+      response = await fetch(url, { ...requestInit, signal: AbortSignal.timeout(20_000) });
     } catch {
       networkError = true;
     }
@@ -247,11 +251,11 @@ async function postAction(key, site, body, idempotencyKey) {
 // via `notified: false` instead, so the UI can show it without risking a
 // duplicate booking from a retry.
 async function scheduleHomeVisit(key, { patientId, title, text }, idempotencyKey) {
-  const resource = await postAction(key, 'community', { type: 'schedule_visit', patientId, title, text }, idempotencyKey);
+  const resource = await postAction(key, 'community', { type: 'schedule_visit', patientId, title, ...(text ? { text } : {}) }, idempotencyKey);
   const booking = normalizeCommunityResource(resource);
 
-  const when = Number.isFinite(booking.startsAt)
-    ? new Date(booking.startsAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })
+  const when = Number.isFinite(resource.dueAt)
+    ? new Date(resource.dueAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short', timeZone: 'Europe/London' })
     : null;
   const body = when
     ? `Your home visit has been booked for ${when}. Reply to this message if you have any questions.`
@@ -266,7 +270,7 @@ async function scheduleHomeVisit(key, { patientId, title, text }, idempotencyKey
       `${idempotencyKey}-notify`
     );
   } catch (err) {
-    console.error(`notify-home-visit ${patientId}: ${err.message}`);
+    console.error('Home-visit SMS confirmation failed.');
     notified = false;
   }
 
@@ -396,6 +400,7 @@ async function handleBookHomeVisit(req, res) {
     if (!patientId || !title || !idempotencyKey) {
       return sendJson(res, 400, { error: 'patientId, title, and idempotencyKey are required.' });
     }
+    if (title.length > 500) return sendJson(res, 400, { error: 'Booking title must be at most 500 characters.' });
     const { booking, notified } = await scheduleHomeVisit(key, { patientId, title, text }, idempotencyKey);
     return sendJson(res, 200, { booking, notified });
   });
@@ -490,6 +495,10 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Careloop listening on http://127.0.0.1:${PORT}`);
-});
+export { latestFiledDischarges, postAction, scheduleHomeVisit };
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`Careloop listening on http://127.0.0.1:${PORT}`);
+  });
+}

@@ -14,10 +14,15 @@ const decisionSchema = z.object({
   rationale: z.string().describe('One or two sentences citing the specific part of the note that drove this decision.'),
   summary: z.string().describe('A short plain-language summary (2-4 sentences) of the discharge note for a non-clinical reviewer: why the patient was admitted and what needs to happen next.'),
   homeVisitBooking: z.object({
-    title: z.string().describe('A short booking title, e.g. "Post-discharge home visit".'),
-    text: z.string().describe('One or two sentences of context for the community team receiving this booking, grounded in the note\'s specific detail.'),
+    title: z.string().trim().min(1).describe('A short, specific booking title, e.g. "Post-discharge wound review at home".'),
+    text: z.string().trim().min(20).describe('A clear one-to-three sentence handover for the community team: what the visit is for and the relevant discharge context, grounded only in the supplied note and patient context.'),
   }).nullable().describe('A draft home-visit booking title and text, only when careType is home-visit, careNeeded is true, and ambiguous is false. Null otherwise.'),
 });
+
+function hasValidHomeVisitDraft(decision) {
+  const needsDraft = decision.careNeeded && decision.careType === 'home-visit' && !decision.ambiguous;
+  return needsDraft === Boolean(decision.homeVisitBooking);
+}
 
 const SYSTEM_PROMPT = `You are a discharge-planning assistant for a community home-visit booking tool.
 You are given the free-text sections of a hospital discharge summary and what is known about the patient.
@@ -34,9 +39,12 @@ Also write "summary": a short, plain-language summary of the discharge note (2-4
 non-clinical reviewer, covering why the patient was admitted and what needs to happen next.
 
 Only when careType is home-visit, careNeeded is true, and ambiguous is false, also draft
-"homeVisitBooking": a short title and a one-to-two sentence note for the community team who will receive
-this booking, grounded in the note's specific detail (e.g. wound care, mobility check, medication
-compliance) rather than generic boilerplate. In every other case, set homeVisitBooking to null.`;
+"homeVisitBooking". Write a specific title and a concise one-to-three sentence handover for the community
+team who will receive the booking. The handover must read naturally and say what the team should assess or
+do at the visit and why, using relevant discharge details such as wound care, mobility, or medication support.
+Include useful constraints or risks when the supplied information supports them. Do not copy fragments,
+invent instructions, diagnoses, timings, or clinical facts, and do not use generic boilerplate. In every
+other case, set homeVisitBooking to null.`;
 
 let cached = null;
 
@@ -88,7 +96,7 @@ export async function evaluateDischargeNote({ sections, patient }) {
   // matches) rather than a hard schema gate — re-validating here is the
   // actual boundary check before an unvalidated shape reaches reconciliation.
   const parsed = decisionSchema.safeParse(result.output.value);
-  if (!parsed.success) {
+  if (!parsed.success || !hasValidHomeVisitDraft(parsed.data)) {
     throw new AgentError('Discharge note evaluation returned an unexpected shape.');
   }
   return parsed.data;

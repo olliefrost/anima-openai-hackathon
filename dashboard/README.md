@@ -15,15 +15,18 @@ If `SIM_API_KEY` is set in the root `.env`, the dashboard connects to it automat
 
 ## What it does
 
-**Full sweep** (`POST /api/sweep`) checks the latest discharge summary for
+**Full sweep** (`POST /api/sweep`) checks the latest filed discharge summary for
 each patient, with up to twelve patient evaluations running concurrently.
 Hospital documents and community bookings are fetched once each, in parallel,
 and shared across the sweep. This avoids waiting for every model call in
 sequence; total time still depends on model latency and rate limits. Results
 arrive when the sweep finishes. The results show the successful-check count
 and list failed patient IDs for individual retry; failed checks are not matches.
+Select any flagged, review, or matching patient in the sweep to open the same
+patient-detail view used by an individual check, without running the model again.
 While running, the page explains that model evaluations can take several minutes.
-Sweeps are read-only and never book visits.
+Running a sweep is read-only. A home visit can only be booked after selecting a
+patient and explicitly confirming the editable draft in their patient view.
 
 Unchanged model decisions are reused for up to five minutes across sweeps and
 individual checks. The cache is isolated by team key and the complete agent
@@ -36,7 +39,11 @@ model latency and rate limits; repeat sweeps avoid unchanged model calls.
 
 Enter a patient ID (e.g. `SIM-000001`) and Careloop:
 
-1. Looks up their latest discharge summary from Hospital EPR documents.
+1. Looks up their latest filed discharge summary from Hospital EPR documents.
+   Only documents with `status: "filed"` are eligible; drafts, sent documents,
+   and other statuses are excluded before selecting the latest summary.
+   Patients without a filed summary are reported as having no discharge summary
+   in individual checks and are omitted from the sweep.
 2. Passes the free-text sections to the care-decision agent, which decides
    whether follow-on community care is needed and, if so, which single
    category best fits (only one of which — `home-visit` — this tool can act
@@ -64,19 +71,26 @@ a **Flagged** result as "worth a human look," not a confirmed miss.
 
 When the decision is **home-visit**, care is needed, the decision isn't
 ambiguous, and no matching booking was found, Careloop drafts a booking —
-title and a short note for the community team, written by the same agent
-call from the note's specific detail — and shows it as an editable form. You
+title and a natural-language handover for the community team, written by the
+same LLM call from the note's specific detail. An actionable home-visit
+decision is rejected if that model output is missing or empty, rather than
+falling back to generic booking text. Careloop shows the draft as an editable form. You
 can:
 
 - Edit the title or note text.
 - Click **Book this visit** to send it, or **Not now** to leave it unbooked.
 
+Booking uses the same in-memory simulator team key as the patient check.
+An empty optional note is omitted to meet the simulator request schema.
+Each transient POST retry gets a fresh timeout and reuses the same idempotency key.
+
 Confirming calls NHS-SIM's `schedule_visit` action
 (`POST /api/sites/community/actions`) with an idempotency key, so a retried
 request after a network blip doesn't create a duplicate booking. As part of
-that same click, Careloop also sends the patient an SMS confirming the date
-and time, via NHS-SIM's `messaging_action` on the GP site — so they don't
-have to hear about the visit from anyone but their own care team. If the SMS
+that same click, Careloop queues a simulated SMS confirming the visit, via NHS-SIM's `messaging_action` on the GP site. NHS-SIM queues this message; it does not send a real SMS.
+The message uses the confirmed visit `dueAt` in Europe/London time; when
+no visit time is returned, it says the community team will confirm it separately.
+Record creation time is never presented as the appointment time. If the SMS
 can't be sent, the booking still stands (it's already been made); Careloop
 tells you so you can let the patient know another way. These two calls are
 the **only** writes Careloop performs — every other care type and every

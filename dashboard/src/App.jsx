@@ -1,13 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { urgencyLabel } from './model.js';
-
-const STATUS_META = {
-  ok: { label: 'Matches', className: 'green' },
-  flag: { label: 'Flagged', className: 'red' },
-  review: { label: 'Needs review', className: 'amber' },
-  'no-discharge-summary': { label: 'No discharge summary', className: '' },
-  'check-failed': { label: 'Check failed', className: 'red' },
-};
+import './sweep.css';
 
 // Same score bands as urgencyLabel() in model.js, just mapped to a badge
 // color instead of text.
@@ -46,11 +39,6 @@ async function postJson(path, body) {
 
 function newIdempotencyKey(patientId) {
   return `home-visit-${patientId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function StatusBadge({ status }) {
-  const meta = STATUS_META[status] || { label: status, className: '' };
-  return <span className={`badge ${meta.className}`}>{meta.label}</span>;
 }
 
 function UrgencyBadge({ score }) {
@@ -133,9 +121,9 @@ function DischargeLetter({ sections }) {
 // click — never automatically, and never for any other care type. Booking
 // also sends the patient an SMS confirming the date/time, as part of that
 // same confirmed action rather than a separate step.
-function HomeVisitBooking({ patientId, decision, reconciliation, onBooked }) {
+function HomeVisitBooking({ simulatorKey, patientId, decision, reconciliation, onBooked }) {
   const draft = decision.homeVisitBooking;
-  const [title, setTitle] = useState(draft?.title ?? 'Post-discharge home visit');
+  const [title, setTitle] = useState(draft?.title ?? '');
   const [text, setText] = useState(draft?.text ?? '');
   const [idempotencyKey] = useState(() => newIdempotencyKey(patientId));
   const [status, setStatus] = useState('review'); // review | sending | booked | error | dismissed
@@ -156,14 +144,14 @@ function HomeVisitBooking({ patientId, decision, reconciliation, onBooked }) {
   if (status === 'booked') {
     return <div className="booking-card booked">
       <strong>Home visit booked</strong>
-      <p className="hint">Community care already has it. {notified ? 'The patient has been sent an SMS with the date and time.' : "The patient's SMS confirmation could not be sent — let them know the appointment time another way."}</p>
+      <p className="hint">Community care already has it. {notified ? 'A simulated SMS confirmation has been queued in NHS-SIM.' : "The patient's SMS confirmation could not be sent — let them know the appointment time another way."}</p>
     </div>;
   }
 
   async function confirmBooking() {
     setStatus('sending'); setError('');
     try {
-      const data = await postJson('/api/book-home-visit', { patientId, title: title.trim(), text: text.trim(), idempotencyKey });
+      const data = await postJson('/api/book-home-visit', { key: simulatorKey, patientId, title: title.trim(), text: text.trim(), idempotencyKey });
       setNotified(data.notified);
       setStatus('booked');
       onBooked(data.booking);
@@ -175,14 +163,14 @@ function HomeVisitBooking({ patientId, decision, reconciliation, onBooked }) {
 
   return <div className="booking-card">
     <strong>Home visit needed — not yet booked</strong>
-    <p className="hint">No matching community booking was found after discharge. Review and edit this booking, then confirm — community care will have it immediately.</p>
+    <p className="hint">No matching community booking was found after discharge. The title and handover below were drafted by the care-decision model from this discharge note. Review and edit them, then confirm.</p>
     <label htmlFor="visit-title">Title</label>
-    <input id="visit-title" value={title} onChange={(event) => setTitle(event.target.value)} />
-    <label htmlFor="visit-text">Note for the community team</label>
-    <textarea id="visit-text" rows={3} value={text} onChange={(event) => setText(event.target.value)} />
+    <input id="visit-title" maxLength={500} disabled={status === 'sending'} value={title} onChange={(event) => setTitle(event.target.value)} />
+    <label htmlFor="visit-text">AI-drafted note for the community team</label>
+    <textarea id="visit-text" rows={3} disabled={status === 'sending'} value={text} onChange={(event) => setText(event.target.value)} />
     {error && <div className="error-text" role="alert">{error}</div>}
     <div className="detail-actions">
-      <button className="button primary" disabled={status === 'sending' || !title.trim()} onClick={confirmBooking}>{status === 'sending' ? 'Booking…' : 'Book this visit'}</button>
+      <button className="button primary" disabled={status === 'sending' || !title.trim() || !text.trim()} onClick={confirmBooking}>{status === 'sending' ? 'Booking…' : 'Book this visit'}</button>
       <button className="button" type="button" disabled={status === 'sending'} onClick={() => setStatus('dismissed')}>Not now</button>
     </div>
   </div>;
@@ -199,7 +187,21 @@ function BookingsList({ bookings }) {
   ))}</div>;
 }
 
-function SweepResults({ results }) {
+function SweepPatient({ result, tone, onSelect }) {
+  return <button className={`sweep-patient ${tone}`} type="button" onClick={() => onSelect(result)}>
+    <span>
+      <strong>{result.patientName || result.patientId}</strong>
+      {result.patientName && <small>{result.patientId}</small>}
+      <span className="hint">{result.reconciliation.reason}</span>
+    </span>
+    <span className="sweep-patient-meta">
+      <UrgencyBadge score={result.reconciliation.urgencyScore} />
+      <span aria-hidden="true">View patient →</span>
+    </span>
+  </button>;
+}
+
+function SweepResults({ results, onSelect }) {
   if (!results || results.length === 0) return <p className="hint">No discharge summaries found.</p>;
   const flagged = results.filter((r) => r.reconciliation?.status === 'flag');
   const review = results.filter((r) => r.reconciliation?.status === 'review');
@@ -232,31 +234,25 @@ function SweepResults({ results }) {
     {flagged.length > 0 && <div>
       <h3 style={{ color: '#dc2626', marginBottom: 12 }}>Flagged</h3>
       <div style={{ display: 'grid', gap: 12, marginBottom: 24 }}>
-        {flagged.map((r) => (
-          <div key={r.patientId} style={{ padding: 12, border: '1px solid #fecaca', borderRadius: 4, backgroundColor: '#fef2f2' }}>
-            <strong>{r.patientName || r.patientId}</strong>
-            <p className="hint">{r.reconciliation.reason}</p>
-            <small><UrgencyBadge score={r.reconciliation.urgencyScore} /></small>
-          </div>
-        ))}
+        {flagged.map((r) => <SweepPatient key={r.patientId} result={r} tone="flagged" onSelect={onSelect} />)}
       </div>
     </div>}
     {review.length > 0 && <div>
       <h3 style={{ color: '#f59e0b', marginBottom: 12 }}>Need review</h3>
       <div style={{ display: 'grid', gap: 12, marginBottom: 24 }}>
-        {review.map((r) => (
-          <div key={r.patientId} style={{ padding: 12, border: '1px solid #fde68a', borderRadius: 4, backgroundColor: '#fffbeb' }}>
-            <strong>{r.patientName || r.patientId}</strong>
-            <p className="hint">{r.reconciliation.reason}</p>
-            <small><UrgencyBadge score={r.reconciliation.urgencyScore} /></small>
-          </div>
-        ))}
+        {review.map((r) => <SweepPatient key={r.patientId} result={r} tone="review" onSelect={onSelect} />)}
+      </div>
+    </div>}
+    {ok.length > 0 && <div>
+      <h3 style={{ color: '#16a34a', marginBottom: 12 }}>Matches</h3>
+      <div style={{ display: 'grid', gap: 12, marginBottom: 24 }}>
+        {ok.map((r) => <SweepPatient key={r.patientId} result={r} tone="ok" onSelect={onSelect} />)}
       </div>
     </div>}
   </div>;
 }
 
-function ResultDetail({ result, onBooked }) {
+function ResultDetail({ result, simulatorKey, onBooked }) {
   if (result.status === 'no-discharge-summary') {
     return <div className="empty">No discharge summary found for {result.patientName || result.patientId} in Hospital EPR documents.</div>;
   }
@@ -269,11 +265,7 @@ function ResultDetail({ result, onBooked }) {
       <p>{result.decision.summary}</p>
       <small>{result.dischargeSummary.title} · Sent {formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)}</small>
     </div>
-    <div className="detail-alert">
-      <StatusBadge status={result.reconciliation.status} /> <UrgencyBadge score={result.reconciliation.urgencyScore} />
-      <span style={{ marginLeft: 8 }}>{result.reconciliation.reason}</span>
-    </div>
-    <HomeVisitBooking patientId={result.patientId} decision={result.decision} reconciliation={result.reconciliation} onBooked={onBooked} />
+    <HomeVisitBooking simulatorKey={simulatorKey} patientId={result.patientId} decision={result.decision} reconciliation={result.reconciliation} onBooked={onBooked} />
     <DischargeLetter sections={result.dischargeSummary.sections} />
     <h3>Booked community care</h3>
     <BookingsList bookings={result.bookings} />
@@ -357,11 +349,18 @@ export default function App() {
     setResult((prev) => (prev ? { ...prev, bookings: [...prev.bookings, booking] } : prev));
   }
 
+  function showSweepPatient(sweepResult) {
+    setPatientIdInput(sweepResult.patientId);
+    setCheckError('');
+    setResult(sweepResult);
+    setActivePage('check');
+  }
+
   return <>
     <Sidebar activePage={activePage} onPageChange={setActivePage} />
     <main>
       <header><div className="breadcrumb">Careloop</div><button className="button" onClick={showConnection}>{team ? `Connected · ${team.world}` : connecting ? 'Connecting…' : 'Connect simulator ↗'}</button></header>
-      <section className="heading"><div><div className="eyebrow">DISCHARGE → HOME VISIT</div><h1>Does this patient need a home visit booked?</h1><p>Reads the discharge note, decides if a home visit is needed, and books it in NHS-SIM once you confirm.</p></div></section>
+      <section className="heading"><div><div className="eyebrow">DISCHARGE → HOME VISIT</div><h1>Does this patient need a home visit booked?</h1></div></section>
       {!team && <div className="notice" role="status">{connecting ? 'Connecting to NHS-SIM…' : 'Not connected. Connect your NHS-SIM team to run a check.'}</div>}
 
       {activePage === 'sweep' && <section className="worklist">
@@ -370,7 +369,7 @@ export default function App() {
           <button className="button primary" disabled={!team || sweepLoading} onClick={runSweep}>{sweepLoading ? 'Running sweep…' : 'Run full sweep'}</button>
         </div>
         {sweepError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{sweepError}</div>}
-        {sweepResults && <div style={{ padding: '0 22px 24px' }}><SweepResults results={sweepResults} /></div>}
+        {sweepResults && <div style={{ padding: '0 22px 24px' }}><SweepResults results={sweepResults} onSelect={showSweepPatient} /></div>}
         {!sweepResults && !sweepError && <div className="empty">{sweepLoading ? 'Checking discharge summaries. This can take several minutes; results appear when all checks finish.' : team ? 'Click "Run full sweep" to check all discharge summaries.' : 'Connect your NHS-SIM team first.'}</div>}
       </section>}
 
@@ -383,7 +382,7 @@ export default function App() {
           </form>
         </div>
         {checkError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{checkError}</div>}
-        {result && <div style={{ padding: '0 22px 24px' }}><ResultDetail result={result} onBooked={handleBooked} /></div>}
+        {result && <div style={{ padding: '0 22px 24px' }}><ResultDetail simulatorKey={key} result={result} onBooked={handleBooked} /></div>}
         {!result && !checkError && <div className="empty">{team ? 'Enter a patient ID above and run a check.' : 'Connect your NHS-SIM team first.'}</div>}
       </section>}
 
