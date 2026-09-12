@@ -6,7 +6,7 @@ This repository contains **Careloop**, a local dashboard for reviewing patient-l
 
 Keep these concerns separate:
 
-- `dashboard/` is the Careloop application. It uses React and Vite with a FastAPI backend.
+- `dashboard/` is the Careloop application. It uses React and Vite with a Node backend.
 - `agent.js` is an independent JavaScript ADK example.
 
 ## Tech stack
@@ -14,11 +14,11 @@ Keep these concerns separate:
 | Layer | Technology | Where |
 |---|---|---|
 | Frontend | React 19, Vite 7, ES modules | `dashboard/src/` |
-| Backend | FastAPI (Python), Uvicorn | `dashboard/server.py` |
+| Backend | Node built-in `http`, ES modules | `dashboard/server.js` |
 | Domain logic | Framework-free JS functions | `dashboard/src/model.js` |
 | Tests | Node built-in test runner (`node --test`) | `dashboard/src/model.test.js` |
-| Dev orchestration | `concurrently` (runs Vite + Uvicorn together) | `package.json` |
-| External data | NHS-SIM simulator (read-only HTTP API) | `dashboard/server.py` |
+| Dev orchestration | `concurrently` (runs Vite + the Node server together) | `package.json` |
+| External data | NHS-SIM simulator (read-only HTTP API) | `dashboard/server.js` |
 | CLI example | `@animahealth/adk` + OpenAI model backend | `agent.js` |
 
 There is no separate state-management library, CSS framework, or ORM — keep
@@ -45,7 +45,7 @@ project-specific rules below:
   add defensive checks for conditions that can't occur internally.
 - **Keep domain logic pure and testable.** New aggregation, status, or
   attention rules belong in `dashboard/src/model.js` as pure functions, not
-  scattered into `App.jsx` or `server.py`, so they stay unit-testable without
+  scattered into `App.jsx` or `server.js`, so they stay unit-testable without
   a browser or server.
 - **Security is not optional.** Preserve the server's loopback binding,
   origin checks, request-size limit, timeouts, CSP headers, and `no-store`
@@ -66,8 +66,8 @@ project-specific rules below:
 - `dashboard/src/App.jsx` — React components, state, filtering, flags, notes, and simulator connection flow.
 - `dashboard/src/model.js` — pure aggregation, deduplication, status, and attention rules.
 - `dashboard/src/model.test.js` — Node test coverage for the model rules.
-- `dashboard/vite.config.js` — Vite build and FastAPI development proxy.
-- `dashboard/server.py` — loopback-only FastAPI static server and read-only NHS-SIM proxy.
+- `dashboard/vite.config.js` — Vite build and Node development proxy.
+- `dashboard/server.js` — loopback-only Node static server and read-only NHS-SIM proxy.
 - `dashboard/README.md` — user-facing setup and behavior notes.
 - `agent.js` — Anima ADK/OpenAI CLI example.
 
@@ -76,11 +76,8 @@ project-specific rules below:
 Run commands from the repository root:
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
 npm install
-npm run dev       # Vite at :5173 and FastAPI at :8000
+npm run dev       # Vite at :5173 and the Node API at :8000
 npm run build     # production frontend build
 npm start         # production app at http://localhost:3000
 npm test          # Node model tests

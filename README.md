@@ -18,20 +18,17 @@ in [`agent.js`](./agent.js), kept separate from the dashboard.
 | Layer | Technology |
 |---|---|
 | Frontend | React 19 + Vite 7 (`dashboard/src`) |
-| Backend | FastAPI (Python) serving the built frontend and proxying NHS-SIM (`dashboard/server.py`) |
+| Backend | Node (built-in `http`) serving the built frontend and proxying NHS-SIM (`dashboard/server.js`) |
 | Domain logic | Plain JS functions, framework-free, in `dashboard/src/model.js` |
 | Tests | Node's built-in test runner (`node --test`) against `model.js` |
-| Dev orchestration | `concurrently` runs Vite and Uvicorn together (`npm run dev`) |
+| Dev orchestration | `concurrently` runs Vite and the Node server together (`npm run dev`) |
 | CLI example | `agent.js` — `@animahealth/adk` with an OpenAI model backend |
 
 ## Getting started
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
 npm install
-npm run dev        # Vite dev server at :5173, FastAPI at :8000
+npm run dev        # Vite dev server at :5173, Node API at :8000
 ```
 
 Then open http://localhost:5173. See [`dashboard/README.md`](./dashboard/README.md)
@@ -51,7 +48,7 @@ dashboard/            Careloop application (frontend + backend)
   src/App.jsx         React UI, filtering, flags, notes, simulator connection
   src/model.js         Pure aggregation, dedup, and attention rules
   src/model.test.js    Tests for model.js
-  server.py            Loopback-only FastAPI static server + NHS-SIM proxy
+  server.js            Loopback-only Node static server + NHS-SIM proxy
   README.md            Dashboard-specific setup and behavior notes
 agent.js              Standalone Anima ADK/OpenAI CLI example
 AGENTS.md             Conventions, guardrails, and commands for AI coding agents

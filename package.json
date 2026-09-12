@@ -1,12 +1,12 @@
 {
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web -c blue,green \"python3 -m uvicorn dashboard.server:app --host 127.0.0.1 --port 8000 --reload\" \"vite --config dashboard/vite.config.js\"",
-    "dev:api": "python3 -m uvicorn dashboard.server:app --host 127.0.0.1 --port 8000 --reload",
+    "dev": "concurrently -k -n api,web -c blue,green \"node --watch dashboard/server.js\" \"vite --config dashboard/vite.config.js\"",
+    "dev:api": "node --watch dashboard/server.js",
     "dev:web": "vite --config dashboard/vite.config.js",
     "build": "vite build --config dashboard/vite.config.js",
     "preview": "vite preview --config dashboard/vite.config.js",
-    "start": "python3 -m uvicorn dashboard.server:app --host 127.0.0.1 --port 3000",
+    "start": "PORT=3000 node dashboard/server.js",
     "test": "node --test dashboard/src/model.test.js",
     "agent": "node agent.js"
   },
