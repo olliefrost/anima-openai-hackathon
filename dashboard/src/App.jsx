@@ -17,10 +17,6 @@ function urgencyBadgeClass(score) {
   return 'green';
 }
 
-function formatDate(timestamp) {
-  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
-}
-
 function formatCareType(type) {
   if (!type) return 'None identified';
   return type.split('-').map((word) => word[0].toUpperCase() + word.slice(1)).join(' ');
@@ -96,7 +92,7 @@ function BookingsList({ bookings, evaluations }) {
     return <div key={booking.id}>
       <span className={`timeline-dot ${booking.status === 'completed' ? 'done' : ''}`} />
       <strong>{booking.title || booking.kind}</strong>{badge && <span className={`badge ${badge.className}`} style={{ marginLeft: 8 }}>{badge.label}</span>}
-      <small>{booking.kind} · {booking.status} · {formatDate(booking.startsAt)}</small>
+      <small>{booking.kind} · {booking.status}</small>
       {evaluation && <small>{evaluation.reason}</small>}
     </div>;
   })}</div>;
@@ -116,7 +112,7 @@ function ResultDetail({ result }) {
       <small>{result.reconciliation.scoreExplanation}</small>
     </div>
     <h3>Discharge note</h3>
-    <p><strong>{result.dischargeSummary.title}</strong><br /><small>Sent {formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)} by {result.dischargeSummary.sentBy || 'unknown'}</small></p>
+    <p><strong>{result.dischargeSummary.title}</strong><br /><small>Sent by {result.dischargeSummary.sentBy || 'unknown'}</small></p>
     <details><summary>Discharge note sections</summary><DischargeSections sections={result.dischargeSummary.sections} /></details>
     <h3>Care decision</h3>
     <dl>
@@ -159,7 +155,7 @@ export default function App() {
   const [sweepResults, setSweepResults] = useState(null);
   const [sweepLoading, setSweepLoading] = useState(false);
   const [sweepError, setSweepError] = useState('');
-  const [sweepCheckedAt, setSweepCheckedAt] = useState(null);
+  const [sweepProgress, setSweepProgress] = useState(null);
   const [statusFilter, setStatusFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(null);
@@ -211,12 +207,34 @@ export default function App() {
     } finally { setSingleLoading(false); }
   }
 
+  // /api/sweep streams newline-delimited JSON progress events instead of one
+  // JSON response, so the count next to the progress bar reflects patients
+  // actually checked so far, not a guess.
   async function runSweep() {
-    setSweepLoading(true); setSweepError(''); setSweepResults(null);
+    setSweepLoading(true); setSweepError(''); setSweepResults(null); setSweepProgress(null);
     try {
-      const data = await postJson('/api/sweep', { key });
-      setSweepResults(data.results);
-      setSweepCheckedAt(data.checkedAt);
+      const response = await fetch('/api/sweep', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Request failed.');
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { done: streamDone, value } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        let newlineIndex;
+        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line) continue;
+          const event = JSON.parse(line);
+          if (event.type === 'progress') setSweepProgress({ done: event.done, total: event.total });
+          else if (event.type === 'done') setSweepResults(event.results);
+        }
+      }
     } catch (error) {
       setSweepError(error.message);
     } finally { setSweepLoading(false); }
@@ -270,10 +288,14 @@ export default function App() {
       {view === 'sweep' && <>
         <section className="metrics" aria-label="Sweep summary">{metrics.map(([label, count, subtitle, filterValue], index) => <button key={label} className={`metric m${index} ${statusFilter === filterValue ? 'selected' : ''}`} onClick={() => setStatusFilter(filterValue)}><span>{label}</span><strong>{count}</strong><small>{subtitle}</small></button>)}</section>
         <section className="worklist">
-          <div className="section-title"><div><h2>Full sweep <span>{filteredSweep.length}</span></h2><p>{sweepCheckedAt ? `Checked ${formatDate(sweepCheckedAt)}` : 'Runs a check for every patient with a hospital discharge summary.'}</p></div><button className="button primary" disabled={!team || sweepLoading} onClick={runSweep}>{sweepLoading ? 'Checking all patients…' : 'Run full sweep'}</button></div>
+          <div className="section-title"><div><h2>Full sweep <span>{filteredSweep.length}</span></h2><p>{sweepResults ? 'Full sweep complete.' : 'Runs a check for every patient with a hospital discharge summary.'}</p></div><button className="button primary" disabled={!team || sweepLoading} onClick={runSweep}>{sweepLoading ? 'Checking all patients…' : 'Run full sweep'}</button></div>
+          {sweepLoading && <div className="sweep-progress-row">
+            <div className="sweep-progress" role="progressbar" aria-label="Running full sweep" aria-busy="true"><div className="sweep-progress-bar" /></div>
+            <small>{sweepProgress ? `${sweepProgress.done}/${sweepProgress.total} checked` : 'Starting…'}</small>
+          </div>}
           <div className="controls"><div className="filters"><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search patient…" aria-label="Search patient" /></div></div>
           {sweepError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{sweepError}</div>}
-          {sweepResults && <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Discharge note</th><th>Decision</th><th>Booked care</th><th>Status</th><th>Urgency</th></tr></thead><tbody>{filteredSweep.map((result) => { const name = result.patientName || result.patientId; const initials = name.split(' ').slice(0, 2).map((part) => part[0]).join(''); const failed = result.status === 'check-failed'; return <tr key={result.patientId}><td><button className="patient-button" onClick={() => showDetail(result)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{result.patientId}</small></span></button></td>{failed ? <td colSpan={3}><button className="task-button" onClick={() => showDetail(result)}>Couldn't complete this check</button><small>{result.error}</small></td> : <><td><button className="task-button" onClick={() => showDetail(result)}>{result.dischargeSummary.title}</button><small>{formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)}</small></td><td>{formatCareType(result.decision.careType)}<small>{result.decision.careNeeded ? `${result.decision.confidence} confidence` : 'No care needed'}</small></td><td>{result.bookings.length} record{result.bookings.length === 1 ? '' : 's'}</td></>}<td><StatusBadge status={result.reconciliation?.status ?? result.status} /></td><td><UrgencyBadge score={result.reconciliation?.urgencyScore ?? 0} /></td></tr>; })}</tbody></table></div>}
+          {sweepResults && <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Discharge note</th><th>Decision</th><th>Booked care</th><th>Status</th><th>Urgency</th></tr></thead><tbody>{filteredSweep.map((result) => { const name = result.patientName || result.patientId; const initials = name.split(' ').slice(0, 2).map((part) => part[0]).join(''); const failed = result.status === 'check-failed'; return <tr key={result.patientId}><td><button className="patient-button" onClick={() => showDetail(result)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{result.patientId}</small></span></button></td>{failed ? <td colSpan={3}><button className="task-button" onClick={() => showDetail(result)}>Couldn't complete this check</button><small>{result.error}</small></td> : <><td><button className="task-button" onClick={() => showDetail(result)}>{result.dischargeSummary.title}</button></td><td>{formatCareType(result.decision.careType)}<small>{result.decision.careNeeded ? `${result.decision.confidence} confidence` : 'No care needed'}</small></td><td>{result.bookings.length} record{result.bookings.length === 1 ? '' : 's'}</td></>}<td><StatusBadge status={result.reconciliation?.status ?? result.status} /></td><td><UrgencyBadge score={result.reconciliation?.urgencyScore ?? 0} /></td></tr>; })}</tbody></table></div>}
           {sweepResults && filteredSweep.length === 0 && <div className="empty">No matching patients.<p>Try a different filter or search.</p></div>}
           {!sweepResults && !sweepError && <div className="empty">{team ? 'Run a full sweep to check every discharged patient.' : 'Connect your NHS-SIM team first.'}</div>}
         </section>

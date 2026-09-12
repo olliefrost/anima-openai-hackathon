@@ -311,6 +311,13 @@ async function runCheckTolerant(key, patientId, discharges, resources) {
   }
 }
 
+// A sweep can take a while (one OpenAI call per patient), so results stream
+// back as newline-delimited JSON progress events instead of one JSON blob at
+// the end — the UI has something real to show ("12/60 checked") while it
+// waits, not just a spinner. Every per-patient error is already caught by
+// runCheckTolerant before this point, so nothing here should throw after
+// writeHead(); an unexpected throw would still just truncate the stream,
+// which the outer request handler's `!res.headersSent` guard already covers.
 async function handleSweep(req, res) {
   return withKey(req, res, async (key) => {
     const discharges = await hospitalDischarges(key);
@@ -319,16 +326,29 @@ async function handleSweep(req, res) {
     // wastes requests and widens the window a transient sim blip can land in.
     const resources = await communityResources(key);
     const patientIds = [...discharges.latest.keys()];
+    const total = patientIds.length;
+
+    securityHeaders(res);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.writeHead(200);
+
     const results = [];
+    let done = 0;
     for (let offset = 0; offset < patientIds.length; offset += SWEEP_CONCURRENCY) {
       const batch = await Promise.all(
         patientIds
           .slice(offset, offset + SWEEP_CONCURRENCY)
-          .map((patientId) => runCheckTolerant(key, patientId, discharges, resources))
+          .map(async (patientId) => {
+            const result = await runCheckTolerant(key, patientId, discharges, resources);
+            done += 1;
+            res.write(`${JSON.stringify({ type: 'progress', done, total })}\n`);
+            return result;
+          })
       );
       results.push(...batch);
     }
-    return sendJson(res, 200, { results, checkedAt: Date.now() });
+    res.write(`${JSON.stringify({ type: 'done', results })}\n`);
+    res.end();
   });
 }
 
