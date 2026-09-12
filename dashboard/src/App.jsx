@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { urgencyLabel } from './model.js';
 
 const STATUS_META = {
   ok: { label: 'Matches', className: 'green' },
@@ -6,7 +7,14 @@ const STATUS_META = {
   review: { label: 'Needs review', className: 'amber' },
   'no-discharge-summary': { label: 'No discharge summary', className: '' },
 };
-const STATUS_SCORE = { flag: 3, review: 2, ok: 1, 'no-discharge-summary': 0 };
+
+// Same score bands as urgencyLabel() in model.js, just mapped to a badge
+// color instead of text.
+function urgencyBadgeClass(score) {
+  if (score >= 80) return 'red';
+  if (score >= 30) return 'amber';
+  return 'green';
+}
 
 function formatDate(timestamp) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
@@ -27,6 +35,11 @@ async function postJson(path, body) {
 function StatusBadge({ status }) {
   const meta = STATUS_META[status] || { label: status, className: '' };
   return <span className={`badge ${meta.className}`}>{meta.label}</span>;
+}
+
+function UrgencyBadge({ score }) {
+  if (!score) return null;
+  return <span className={`badge ${urgencyBadgeClass(score)}`}>{urgencyLabel(score)} · {score}</span>;
 }
 
 function Sidebar({ view, setView }) {
@@ -73,12 +86,15 @@ function ResultDetail({ result }) {
     return <div className="empty">No discharge summary found for {result.patientName || result.patientId} in Hospital EPR documents.</div>;
   }
   return <>
-    <div className="detail-alert"><StatusBadge status={result.reconciliation.status} /> <span style={{ marginLeft: 8 }}>{result.reconciliation.reason}</span></div>
+    <div className="detail-alert">
+      <StatusBadge status={result.reconciliation.status} /> <UrgencyBadge score={result.reconciliation.urgencyScore} />
+      <span style={{ marginLeft: 8 }}>{result.reconciliation.reason}</span>
+    </div>
     <h3>Care decision</h3>
     <dl>
       <div><dt>Care needed</dt><dd>{result.decision.careNeeded ? 'Yes' : 'No'}</dd></div>
       <div><dt>Care type</dt><dd>{formatCareType(result.decision.careType)}</dd></div>
-      <div><dt>Urgency</dt><dd>{result.decision.urgency || '—'}</dd></div>
+      <div><dt>Clinical urgency (from the note)</dt><dd>{result.decision.urgency || '—'}</dd></div>
       <div><dt>Confidence</dt><dd>{result.decision.confidence}</dd></div>
     </dl>
     <p className="hint">{result.decision.rationale}</p>
@@ -178,7 +194,8 @@ export default function App() {
   const filteredSweep = (sweepResults || [])
     .filter((r) => statusFilter === 'all' || r.reconciliation.status === statusFilter)
     .filter((r) => `${r.patientName || ''} ${r.patientId}`.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => STATUS_SCORE[b.reconciliation.status] - STATUS_SCORE[a.reconciliation.status]);
+    // Highest urgency first — this is the ranking the sweep exists to produce.
+    .sort((a, b) => b.reconciliation.urgencyScore - a.reconciliation.urgencyScore);
 
   const metrics = [
     ['Checked', counts.all, 'Patients with a discharge summary', 'all'],
@@ -213,7 +230,7 @@ export default function App() {
           <div className="section-title"><div><h2>Full sweep <span>{filteredSweep.length}</span></h2><p>{sweepCheckedAt ? `Checked ${formatDate(sweepCheckedAt)}` : 'Runs a check for every patient with a hospital discharge summary.'}</p></div><button className="button primary" disabled={!team || sweepLoading} onClick={runSweep}>{sweepLoading ? 'Checking all patients…' : 'Run full sweep'}</button></div>
           <div className="controls"><div className="filters"><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search patient…" aria-label="Search patient" /></div></div>
           {sweepError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{sweepError}</div>}
-          {sweepResults && <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Discharge note</th><th>Decision</th><th>Booked care</th><th>Status</th></tr></thead><tbody>{filteredSweep.map((result) => { const name = result.patientName || result.patientId; const initials = name.split(' ').slice(0, 2).map((part) => part[0]).join(''); return <tr key={result.patientId}><td><button className="patient-button" onClick={() => showDetail(result)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{result.patientId}</small></span></button></td><td><button className="task-button" onClick={() => showDetail(result)}>{result.dischargeSummary.title}</button><small>{formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)}</small></td><td>{formatCareType(result.decision.careType)}<small>{result.decision.careNeeded ? `${result.decision.confidence} confidence` : 'No care needed'}</small></td><td>{result.bookings.length} record{result.bookings.length === 1 ? '' : 's'}</td><td><StatusBadge status={result.reconciliation.status} /></td></tr>; })}</tbody></table></div>}
+          {sweepResults && <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Discharge note</th><th>Decision</th><th>Booked care</th><th>Status</th><th>Urgency</th></tr></thead><tbody>{filteredSweep.map((result) => { const name = result.patientName || result.patientId; const initials = name.split(' ').slice(0, 2).map((part) => part[0]).join(''); return <tr key={result.patientId}><td><button className="patient-button" onClick={() => showDetail(result)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{result.patientId}</small></span></button></td><td><button className="task-button" onClick={() => showDetail(result)}>{result.dischargeSummary.title}</button><small>{formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)}</small></td><td>{formatCareType(result.decision.careType)}<small>{result.decision.careNeeded ? `${result.decision.confidence} confidence` : 'No care needed'}</small></td><td>{result.bookings.length} record{result.bookings.length === 1 ? '' : 's'}</td><td><StatusBadge status={result.reconciliation.status} /></td><td><UrgencyBadge score={result.reconciliation.urgencyScore} /></td></tr>; })}</tbody></table></div>}
           {sweepResults && filteredSweep.length === 0 && <div className="empty">No matching patients.<p>Try a different filter or search.</p></div>}
           {!sweepResults && !sweepError && <div className="empty">{team ? 'Run a full sweep to check every discharged patient.' : 'Connect your NHS-SIM team first.'}</div>}
         </section>

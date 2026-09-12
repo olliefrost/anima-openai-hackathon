@@ -50,12 +50,7 @@ export function matchesCareType(booking, careType) {
   return keywords.some((keyword) => haystack.includes(keyword));
 }
 
-// decision: { careNeeded, careType, ambiguous } from careAgent.js
-// bookings: normalized community records for this patient, each with a
-//           `startsAt` timestamp where known
-// dischargeAt: timestamp the discharge note was sent, for "booked after
-//              discharge" comparisons
-export function reconcile(decision, bookings, dischargeAt) {
+function outcomeFor(decision, bookings, dischargeAt) {
   if (decision.ambiguous) {
     return { status: 'review', reason: 'The discharge note decision was ambiguous and needs a human read.' };
   }
@@ -93,4 +88,43 @@ export function reconcile(decision, bookings, dischargeAt) {
   }
 
   return { status: 'review', reason: `Could not confidently match booked community care against the recommended ${decision.careType || 'care type'}; needs a human read.` };
+}
+
+// Triage score for ranking discrepancies, highest first, in a full sweep (a
+// single check just shows its own score). Clinical urgency from the note
+// dominates over how *sure* the reconciliation is that there's a gap: an
+// urgent case still needs eyes on it quickly even when the best we could do
+// is "needs review", not a confirmed "flag". `ok` and a missing discharge
+// summary aren't discrepancies at all, so they always score 0 — there's
+// nothing to triage. Deliberately doesn't factor in `decision.confidence`;
+// that's a statement about how sure the *decision* is, not how urgently a
+// human should look at it, and stays a separate, visible field in the UI.
+const URGENCY_SCORES = {
+  flag: { urgent: 100, routine: 50 },
+  review: { urgent: 80, routine: 30 },
+};
+
+function urgencyScoreFor(decision, status) {
+  const band = URGENCY_SCORES[status];
+  if (!band) return 0;
+  return decision.urgency === 'urgent' ? band.urgent : band.routine;
+}
+
+// Human-readable version of the score above, for display next to it.
+export function urgencyLabel(score) {
+  if (score >= 100) return 'Urgent gap';
+  if (score >= 80) return 'Urgent — needs review';
+  if (score >= 50) return 'Needs follow-up';
+  if (score >= 30) return 'Needs review';
+  return 'None';
+}
+
+// decision: { careNeeded, careType, urgency, ambiguous } from careAgent.js
+// bookings: normalized community records for this patient, each with a
+//           `startsAt` timestamp where known
+// dischargeAt: timestamp the discharge note was sent, for "booked after
+//              discharge" comparisons
+export function reconcile(decision, bookings, dischargeAt) {
+  const outcome = outcomeFor(decision, bookings, dischargeAt);
+  return { ...outcome, urgencyScore: urgencyScoreFor(decision, outcome.status) };
 }

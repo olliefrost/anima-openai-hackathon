@@ -14,7 +14,9 @@ once) it:
    rather than guessing when the note doesn't say enough.
 3. Reads what community services actually have booked for that patient.
 4. Reconciles the two and flags a gap: care needed but nothing booked, or a
-   booking that doesn't match the decided care type.
+   booking that doesn't match the decided care type — ranked by an urgency
+   score so a full sweep surfaces the most urgent discrepancies first (a
+   single check just carries its own score).
 
 Careloop is **read-only**: it never books, cancels, or edits a NHS-SIM
 record, and it never contacts community services directly. Its output is a
@@ -228,6 +230,13 @@ data supports:
 - Missing a matching community booking does not prove a handoff failed —
   only that this tool couldn't find one. Phrase flags as something to check,
   not a confirmed care omission.
+- The urgency score (`urgencyScore` in `reconcile()`'s result, `model.js`)
+  ranks how urgently a discrepancy needs a human look, using the note's
+  clinical urgency and whether the gap is confirmed (`flag`) or only
+  suspected (`review`). It deliberately does not fold in `decision.confidence`
+  — how sure the decision is and how urgently a gap needs checking are
+  different questions, and confidence stays a separate, visible field rather
+  than silently discounting the score.
 - Keep NHS-SIM access read-only. This tool must never book, cancel, edit, or
   message on behalf of a service. If that changes, it's a deliberate,
   discussed scope change — see the referrals/`ers` note above for the likely
