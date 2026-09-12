@@ -41,16 +41,51 @@ function bookingText(booking) {
     .toLowerCase();
 }
 
+// Same check as matchesCareType(), but with the reasoning spelled out so the
+// UI can show, per booking, exactly why it counted as a match, a non-match,
+// or unverifiable — this is what makes a reconciliation result auditable
+// instead of a black box.
+export function matchExplanation(booking, careType) {
+  const keywords = careTypeKeywords[careType];
+  if (!keywords) {
+    return { matches: null, reason: `"${careType}" has no defined keyword set, so a booking can't be verified against it by text.` };
+  }
+  const haystack = bookingText(booking);
+  const hit = keywords.find((keyword) => haystack.includes(keyword));
+  if (hit) return { matches: true, reason: `Booking text matched the "${hit}" keyword for ${careType}.` };
+  return { matches: false, reason: `No keyword for ${careType} (e.g. "${keywords[0]}") appears in this booking's title, kind, status, or data.` };
+}
+
 // Returns true/false when the care type has a known keyword set, or null
 // when the type can't be checked this way (currently only `other`).
 export function matchesCareType(booking, careType) {
-  const keywords = careTypeKeywords[careType];
-  if (!keywords) return null;
-  const haystack = bookingText(booking);
-  return keywords.some((keyword) => haystack.includes(keyword));
+  return matchExplanation(booking, careType).matches;
 }
 
-function outcomeFor(decision, bookings, dischargeAt) {
+// Per-booking breakdown behind the reconciliation status — every booking
+// gets a verdict and a plain-text reason, even ones that didn't end up
+// affecting the outcome (booked before discharge, or nothing to check
+// against), so a reviewer can see exactly what was and wasn't counted.
+export function evaluateBookings(decision, bookings, dischargeAt) {
+  return bookings.map((booking) => {
+    // See the comment in outcomeFor() below: missing timestamps count as
+    // "not provably before discharge" rather than being excluded.
+    const afterDischarge = !Number.isFinite(dischargeAt) || !Number.isFinite(booking.startsAt) || booking.startsAt >= dischargeAt;
+    if (!afterDischarge) {
+      return { id: booking.id, afterDischarge, matches: null, reason: 'Booked before discharge — not counted as follow-up care.' };
+    }
+    if (decision.ambiguous) {
+      return { id: booking.id, afterDischarge, matches: null, reason: 'The care decision itself was ambiguous, so this booking was not checked against a care type.' };
+    }
+    if (!decision.careNeeded || !decision.careType) {
+      return { id: booking.id, afterDischarge, matches: null, reason: 'No follow-on care was identified as needed, so this booking was not checked against a care type.' };
+    }
+    const { matches, reason } = matchExplanation(booking, decision.careType);
+    return { id: booking.id, afterDischarge, matches, reason };
+  });
+}
+
+function outcomeFor(decision, evaluations) {
   if (decision.ambiguous) {
     return { status: 'review', reason: 'The discharge note decision was ambiguous and needs a human read.' };
   }
@@ -63,21 +98,21 @@ function outcomeFor(decision, bookings, dischargeAt) {
   // doesn't guarantee one on every resource). Treat "unknown" as "can't prove
   // it was before discharge" rather than excluding it — the guardrail here is
   // to under-flag on missing data, not to over-flag on it.
-  const postDischarge = bookings.filter(
-    (booking) => !Number.isFinite(dischargeAt) || !Number.isFinite(booking.startsAt) || booking.startsAt >= dischargeAt
-  );
+  const postDischarge = evaluations.filter((evaluation) => evaluation.afterDischarge);
 
   if (postDischarge.length === 0) {
     return { status: 'flag', reason: `Discharge note calls for ${decision.careType || 'follow-up care'}, but no community booking was found after discharge.` };
   }
 
-  // `matchesCareType` returns true, false, or null (unverifiable) per booking.
-  // Any confirmed match is enough to call it ok; only when every booking is a
-  // *confirmed* non-match do we flag a gap. A `null` in the mix (an
-  // unverifiable care type, or — see `bookingText` above — a booking whose
-  // title just doesn't say enough) means neither "ok" nor "flag" is honest,
-  // so it falls through to "review" instead of guessing either way.
-  const checks = postDischarge.map((booking) => matchesCareType(booking, decision.careType));
+  // matchExplanation() only ever returns null for *every* booking in this
+  // list, or for *none* of them: it depends solely on whether careTypeKeywords
+  // has an entry for decision.careType (constant across this whole check),
+  // not on anything booking-specific. So after "some confirmed match" and
+  // "every confirmed non-match" are ruled out, the only case left is every
+  // check being null — the care type itself (currently only `other`) has no
+  // keyword set to check bookings against, which is worth its own
+  // self-explanatory reason rather than a generic "couldn't confirm" one.
+  const checks = postDischarge.map((evaluation) => evaluation.matches);
 
   if (checks.some((check) => check === true)) {
     return { status: 'ok', reason: `Booked community care matches the recommended ${decision.careType}.` };
@@ -87,7 +122,10 @@ function outcomeFor(decision, bookings, dischargeAt) {
     return { status: 'flag', reason: `Booked community care does not appear to match the recommended ${decision.careType}.` };
   }
 
-  return { status: 'review', reason: `Could not confidently match booked community care against the recommended ${decision.careType || 'care type'}; needs a human read.` };
+  return {
+    status: 'review',
+    reason: `"${decision.careType}" has no defined keyword set to check booked care against, so this can't be confirmed automatically — needs a human read.`,
+  };
 }
 
 // Triage score for ranking discrepancies, highest first, in a full sweep (a
@@ -104,10 +142,17 @@ const URGENCY_SCORES = {
   review: { urgent: 80, routine: 30 },
 };
 
+// Returns the score plus the one-line reasoning behind it — which band
+// (flag/review) and which half of it (urgent/routine note) produced this
+// number, so the score is never just an unexplained badge.
 function urgencyScoreFor(decision, status) {
   const band = URGENCY_SCORES[status];
-  if (!band) return 0;
-  return decision.urgency === 'urgent' ? band.urgent : band.routine;
+  if (!band) return { score: 0, explanation: 'No discrepancy identified — nothing to triage.' };
+  const urgent = decision.urgency === 'urgent';
+  const score = urgent ? band.urgent : band.routine;
+  const certainty = status === 'flag' ? 'a confirmed gap' : 'an unconfirmed, needs-review gap';
+  const notedUrgency = urgent ? 'urgent' : 'routine';
+  return { score, explanation: `${certainty} on a note marked ${notedUrgency} → ${score}.` };
 }
 
 // Human-readable version of the score above, for display next to it.
@@ -125,6 +170,8 @@ export function urgencyLabel(score) {
 // dischargeAt: timestamp the discharge note was sent, for "booked after
 //              discharge" comparisons
 export function reconcile(decision, bookings, dischargeAt) {
-  const outcome = outcomeFor(decision, bookings, dischargeAt);
-  return { ...outcome, urgencyScore: urgencyScoreFor(decision, outcome.status) };
+  const bookingEvaluations = evaluateBookings(decision, bookings, dischargeAt);
+  const outcome = outcomeFor(decision, bookingEvaluations);
+  const { score, explanation } = urgencyScoreFor(decision, outcome.status);
+  return { ...outcome, urgencyScore: score, scoreExplanation: explanation, bookingEvaluations };
 }

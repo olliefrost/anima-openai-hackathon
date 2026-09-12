@@ -52,6 +52,16 @@ follow-up" matches; one titled just "hi" or "moni" — real examples from
 NHS-SIM test data — won't, even if it's the right visit. Treat a **Flagged**
 result as "worth a human look," not a confirmed miss.
 
+Clicking any patient — in the sweep table or after a single check — opens a
+detail view so a result is never a black box: the discharge note (sections
+and the agent's rationale), the care decision, and every community booking
+for that patient with its own verdict ("Matches decision," "Doesn't match
+decision," or "Not checked") and a one-line reason, e.g. which keyword
+matched or why a booking was excluded (booked before discharge, or the
+decision was ambiguous). The status banner also explains the urgency score
+itself, e.g. "a confirmed gap on a note marked urgent → 100," not just the
+number.
+
 Every discrepancy (a **Flagged** or **Needs review** result) also carries an
 urgency score, shown as a badge (e.g. "Urgent gap · 100"). It's driven mainly
 by the clinical urgency the agent read from the discharge note, not by how
