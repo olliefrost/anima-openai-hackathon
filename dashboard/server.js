@@ -2,8 +2,8 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { reconcile } from './src/model.js';
-import { evaluateDischargeNote, AgentError } from './careAgent.js';
+import { reconcile, bookingsToEvaluate } from './src/model.js';
+import { evaluateDischargeNote, evaluateCareMatch, AgentError } from './careAgent.js';
 
 const DASHBOARD = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(DASHBOARD);
@@ -11,8 +11,10 @@ const DIST = path.join(DASHBOARD, 'dist');
 const MAX_REQUEST_BYTES = 4096;
 const SIMULATOR_URL = 'https://sim.animahacks.com';
 const PORT = Number(process.env.PORT) || 8000;
-// Each check makes one OpenAI call; a full sweep can cover dozens of patients.
-// Batch it rather than firing every request at once or running one at a time.
+// Each check makes one OpenAI call, plus a second when there's a decided
+// care type and a post-discharge booking to check it against; a full sweep
+// can cover dozens of patients. Batch it rather than firing every request at
+// once or running one at a time.
 const SWEEP_CONCURRENCY = 5;
 
 try {
@@ -193,7 +195,18 @@ async function runCheck(key, patientId, discharges, resources) {
   const decision = await evaluateDischargeNote({ sections: doc.data?.sections, patient });
   const bookings = bookedCareFor(resources, patientId);
   const dischargeAt = doc.data?.sentAt ?? doc.createdAt;
-  const reconciliation = reconcile(decision, bookings, dischargeAt);
+
+  // Only the bookings actually worth reasoning about (see bookingsToEvaluate)
+  // get sent to the care-match agent — an ambiguous decision or "no care
+  // needed" already means there's nothing to check against.
+  const toEvaluate = bookingsToEvaluate(decision, bookings, dischargeAt);
+  const matchVerdicts = new Map();
+  if (toEvaluate.length > 0) {
+    const verdicts = await evaluateCareMatch({ careType: decision.careType, rationale: decision.rationale, bookings: toEvaluate });
+    verdicts.forEach((verdict, index) => matchVerdicts.set(toEvaluate[index].id, verdict));
+  }
+
+  const reconciliation = reconcile(decision, bookings, dischargeAt, matchVerdicts);
 
   return {
     patientId,

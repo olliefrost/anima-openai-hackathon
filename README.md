@@ -18,7 +18,7 @@ logic.
 |---|---|
 | Frontend | React 19 + Vite 7 (`dashboard/src`) |
 | Backend | Node (built-in `http`) serving the built frontend and proxying NHS-SIM (`dashboard/server.js`) |
-| Care-decision agent | `@animahealth/adk` + an OpenAI model, structured output (`dashboard/careAgent.js`) |
+| Care-decision & care-match agents | `@animahealth/adk` + an OpenAI model, structured output (`dashboard/careAgent.js`) |
 | Domain logic | Plain JS functions, framework-free, in `dashboard/src/model.js` |
 | Tests | Node's built-in test runner (`node --test`) against `model.js` |
 | Dev orchestration | `concurrently` runs Vite and the Node server together (`npm run dev`) |
@@ -31,19 +31,22 @@ npm run dev        # Vite dev server at :5173, Node API at :8000
 ```
 
 Then open http://localhost:5173. See [`dashboard/README.md`](./dashboard/README.md)
-for full setup, environment variables, and the check/sweep flow.
+for full setup, environment variables, and the check/sweep flow, and
+[`flow.md`](./flow.md) for the exact end-to-end sequence — what calls what,
+in what order, and how a result is decided.
 
 ## Repository layout
 
 ```
 dashboard/            Careloop application (frontend + backend)
   src/App.jsx         React UI — connect, check one patient, or sweep all
-  src/model.js         Pure reconciliation and care-type matching rules
+  src/model.js         Pure reconciliation rules (status + urgency from a match verdict)
   src/model.test.js    Tests for model.js
   server.js            Loopback-only Node static server + NHS-SIM proxy + API routes
-  careAgent.js          ADK agent that structures a discharge note into a care decision
+  careAgent.js          ADK agents: discharge note -> care decision, decision+bookings -> match verdicts
   README.md            Dashboard-specific setup and behavior notes
 AGENTS.md             Conventions, NHS-SIM API reference, guardrails, and commands for AI coding agents
+flow.md               Exact end-to-end workflow: sequence, decision logic, error handling
 CLAUDE.md             Points Claude Code at AGENTS.md
 ```
 

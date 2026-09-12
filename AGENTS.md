@@ -13,7 +13,11 @@ once) it:
    needed, and if so what kind — flagging the decision itself as ambiguous
    rather than guessing when the note doesn't say enough.
 3. Reads what community services actually have booked for that patient.
-4. Reconciles the two and flags a gap: care needed but nothing booked, or a
+4. For each post-discharge booking, uses a second Anima ADK agent to reason
+   about whether it actually delivers the decided care type — not a keyword
+   search — flagging a booking as ambiguous rather than guessing when its
+   text doesn't give enough to tell.
+5. Reconciles the two and flags a gap: care needed but nothing booked, or a
    booking that doesn't match the decided care type — ranked by an urgency
    score so a full sweep surfaces the most urgent discrepancies first (a
    single check just carries its own score).
@@ -34,7 +38,7 @@ that surfaced during that check and how they were fixed.
 |---|---|---|
 | Frontend | React 19, Vite 7, ES modules | `dashboard/src/` |
 | Backend | Node built-in `http`, ES modules | `dashboard/server.js` |
-| Care-decision agent | `@animahealth/adk` + OpenAI model, structured (zod) output | `dashboard/careAgent.js` |
+| Care-decision & care-match agents | `@animahealth/adk` + OpenAI model, structured (zod) output | `dashboard/careAgent.js` |
 | Domain logic | Framework-free JS functions | `dashboard/src/model.js` |
 | Tests | Node built-in test runner (`node --test`) | `dashboard/src/model.test.js` |
 | Dev orchestration | `concurrently` (runs Vite + the Node server together) | `package.json` |
@@ -62,10 +66,14 @@ These apply to every change in this repository:
   the NHS-SIM response, the agent's output, request bodies) as this codebase
   already does; don't add defensive checks for conditions that can't occur
   internally.
-- **Keep domain logic pure and testable.** The reconciliation rule (does
-  booked care match the decision?) lives in `dashboard/src/model.js` as pure
-  functions, not scattered into `App.jsx` or `server.js`, so it stays unit-
-  testable without a browser, server, or model call.
+- **Keep domain logic pure and testable.** The rule for turning a per-booking
+  match verdict into an overall status and urgency score (`outcomeFor`,
+  `urgencyScoreFor` in `dashboard/src/model.js`) is pure and unit-tested
+  without a browser, server, or model call — tests pass it a fixed verdict
+  Map rather than actually calling the agent. *Producing* that verdict is
+  inherently not pure (it's an LLM judgment call, see `evaluateCareMatch` in
+  `careAgent.js`); keep that impurity contained to `careAgent.js` rather than
+  letting it leak into `model.js` or `App.jsx`.
 - **Security is not optional.** Preserve the server's loopback binding,
   origin checks, request-size limit, timeouts, CSP headers, and `no-store`
   responses. Never introduce `dangerouslySetInnerHTML`, string-built SQL/HTML,
@@ -84,11 +92,11 @@ These apply to every change in this repository:
 - `dashboard/index.html` — Vite HTML entrypoint.
 - `dashboard/style.css` — all dashboard styling and responsive rules.
 - `dashboard/src/App.jsx` — React UI: connect to a team, check one patient by ID, or sweep every discharged patient.
-- `dashboard/src/model.js` — pure reconciliation rules (`reconcile`, `matchesCareType`) and the `careTypes` vocabulary.
+- `dashboard/src/model.js` — pure reconciliation rules (`reconcile`, `bookingsToEvaluate`, `evaluateBookings`) and the `careTypes` vocabulary.
 - `dashboard/src/model.test.js` — Node test coverage for the reconciliation rules.
 - `dashboard/vite.config.js` — Vite build and Node development proxy.
 - `dashboard/server.js` — loopback-only Node static server, the read-only NHS-SIM proxy, and the `/api/connect`, `/api/check`, `/api/sweep` routes.
-- `dashboard/careAgent.js` — the ADK agent that turns discharge-note sections into a structured care decision.
+- `dashboard/careAgent.js` — two ADK agents: one turns discharge-note sections into a structured care decision, the other reasons about whether a booking actually delivers that decided care type.
 - `dashboard/README.md` — user-facing setup and behavior notes.
 
 ## Commands
@@ -111,7 +119,7 @@ Do not claim a lint check passed unless a script is added and run.
 - Use a root `.env` for `SIM_API_KEY` and `OPENAI_API_KEY`.
 - Never read, print, commit, expose to the browser, or include real keys in fixtures or error messages.
 - Keep `.env` ignored. If documenting variables, use placeholders in an example file.
-- `SIM_API_KEY` is for NHS-SIM; `OPENAI_API_KEY` is for the care-decision agent in `dashboard/careAgent.js`. They are not interchangeable, and both keys are read server-side only — never sent to the browser.
+- `SIM_API_KEY` is for NHS-SIM; `OPENAI_API_KEY` is for both agents in `dashboard/careAgent.js`. They are not interchangeable, and both keys are read server-side only — never sent to the browser.
 - Simulator and model credentials must remain in server memory or the server environment. Do not persist them in browser storage.
 - **Troubleshooting a `401`/`Incorrect API key` from the agent**: `process.loadEnvFile` does not override a variable already set in the shell. If `OPENAI_API_KEY` was previously exported to something else (e.g. copy-pasted from `SIM_API_KEY`), the `.env` value is silently ignored. Check with `env | grep OPENAI_API_KEY` before assuming the code is broken.
 
@@ -176,11 +184,14 @@ any write call).
   a patient's bookings. Don't add it back to `bookedCareFor()`.
 - Booking titles can be free text with no clinical detail at all — confirmed
   live titles like `"moni"` and `"hi"` from manually scheduled test visits.
-  Reconciliation matches on booking title/kind text via keywords in
-  `model.js`, not an exact `kind` enum, and treats an unrecognised match as
-  "needs review" rather than guessing — this also means a real match can be
-  under-detected when the title is this terse. That's a known precision
-  limit of text matching, not a bug to silently "fix" by guessing.
+  Reconciliation asks the care-match agent (`evaluateCareMatch` in
+  `careAgent.js`) whether a booking's title/kind/status/data plausibly
+  delivers the decided care type, rather than an exact `kind` enum or a
+  keyword lookup — a genuinely too-terse booking should come back
+  `ambiguous` (surfaced as "needs review"), not a guessed match or a
+  confident non-match. A wrong "no-match" verdict is still possible on a
+  title this bare; treat "needs review"/"flag" here as a prompt for a human
+  look, not a guaranteed-correct verdict.
 - **`GET /api/sites/{site}/patients?q=<id>&offset=0`** — patient search/read,
   used as a fallback when a patient isn't in the discharge-documents response.
 - **Available but unused by this tool**: `referrals` site / `GET
@@ -214,6 +225,12 @@ any write call).
 
 ## Anima ADK usage notes (handoff notes)
 
+`careAgent.js` runs two agents on one shared `adk()` app instance: the
+original `discharge_care_decision` (note → care decision) and
+`care_booking_match` (decision + bookings → per-booking match verdict, the
+replacement for the old keyword matching in `model.js`). Both were built
+against the same pitfalls below.
+
 - **`app.agent({ context: [...] })` needs `app.context.history()`, not just
   `app.context.system(...)`.** The system prompt alone does not include
   whatever you pass to `app.run(agent, prompt)` — without `history()` in the
@@ -224,11 +241,19 @@ any write call).
 - **`output: { schema }` still needs re-validation on the result.** ADK's
   structured output runs through a "forgiving" parser (coercion, partial
   matches), so `result.output.value` isn't a hard-guaranteed match for the
-  zod schema — `careAgent.js` calls `decisionSchema.safeParse(...)` before
-  trusting it, and that's the actual boundary check, not the `output` config.
+  zod schema — `careAgent.js` calls `.safeParse(...)` on both agents' output
+  before trusting it, and that's the actual boundary check, not the `output`
+  config. For `care_booking_match`, the check also confirms every booking id
+  sent in the prompt got a verdict back — the schema alone can't catch the
+  model silently dropping an entry from the `verdicts` array.
 - `app.run(agent, promptString)` (the string shorthand) is what this tool
   uses — no need for the `{ input: { message, state } }` form unless you
   need session state.
+- **The care-match agent never sees the raw discharge note, only the already
+  -decided care type and rationale.** This is deliberate: if it saw the note
+  and the bookings together, a wrong or lazy match could quietly rationalize
+  the original decision around what's already booked. Keeping the two calls
+  separate keeps the decision anchored to the note alone.
 
 ## Clinical-product guardrails
 
@@ -240,9 +265,12 @@ data supports:
   the discharge note doesn't specify enough to pick a care type confidently.
   Reconciliation surfaces this as "needs review," not as a false match or a
   false gap.
-- A care type that can't be checked against booked-care text with
-  reasonable confidence (see `matchesCareType` in `model.js`) must also
-  reconcile to "needs review," never a claimed "match."
+- The care-match agent (`evaluateCareMatch` in `careAgent.js`) has the same
+  obligation per booking: prefer an `ambiguous` verdict over guessing when a
+  booking's title/kind/status/data doesn't give it enough to tell whether
+  the care was actually delivered. `outcomeFor` in `model.js` reconciles
+  that to "needs review," never a claimed "match," unless at least one
+  other booking for the same check came back a confirmed match.
 - Missing a matching community booking does not prove a handoff failed —
   only that this tool couldn't find one. Phrase flags as something to check,
   not a confirmed care omission.
@@ -262,10 +290,15 @@ data supports:
 
 ## Testing expectations
 
-- Run `npm test` after changing reconciliation or care-type matching logic.
+- Run `npm test` after changing reconciliation logic. Care-*match* logic
+  itself now runs through `evaluateCareMatch` in `careAgent.js` (an LLM
+  call, not unit-testable) — `model.test.js` tests `outcomeFor`/
+  `urgencyScoreFor` by passing a fixed verdict Map, not by exercising the
+  agent.
 - Add or update focused cases in `dashboard/src/model.test.js` for every
   rule change, including boundary conditions (ambiguous decisions, no care
-  needed, bookings before vs. after discharge, unverifiable care types).
+  needed, bookings before vs. after discharge, and mixed/ambiguous match
+  verdicts).
 - For UI or server changes, also start `npm run dev` and manually verify the
   single-patient check and the full sweep at desktop and narrow viewport
   widths.
@@ -283,3 +316,10 @@ data supports:
 Update `dashboard/README.md` when setup, environment variables, routes,
 user-visible heuristics, privacy behavior, or operating limitations change.
 Keep instructions runnable from the repository root.
+
+Update [`flow.md`](./flow.md) whenever the sequence itself changes — a new
+or reordered NHS-SIM/agent call, a new route, a new branch in
+`outcomeFor`/`urgencyScoreFor`, or a change to retry/error-handling
+behavior. It documents *exactly* what calls what, in what order, and why a
+result comes out the way it does; let it drift and it becomes actively
+misleading rather than just stale.

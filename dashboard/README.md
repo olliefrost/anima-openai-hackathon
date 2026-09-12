@@ -46,21 +46,26 @@ false` and is **Matches** regardless of what else is booked for that patient —
 this tool checks the discharge decision against bookings, not the other way
 around.
 
-Care-type matching is text-based (keywords against a booking's title/kind),
-not exact. A manually scheduled visit with a bare title like "home visit
-follow-up" matches; one titled just "hi" or "moni" — real examples from
-NHS-SIM test data — won't, even if it's the right visit. Treat a **Flagged**
-result as "worth a human look," not a confirmed miss.
+Checking whether a booking actually satisfies the decided care type is a
+second agent call, not a keyword search: it's given the decided care type,
+the reasoning behind it, and the booking's title/kind/status/details, and
+reasons about whether that booking plausibly delivers that care — the same
+way a human reviewer would read it, catching phrasing a fixed keyword list
+would miss (e.g. "wound dressing change" for district nursing). A booking
+too generic or terse to tell either way — real NHS-SIM test titles like "hi"
+or "moni" — comes back **ambiguous** rather than a guessed match or a
+confident non-match, and reconciliation surfaces that as **Needs review**.
+Treat a **Flagged** result as "worth a human look," not a confirmed miss.
 
 Clicking any patient — in the sweep table or after a single check — opens a
 detail view so a result is never a black box: the discharge note (sections
 and the agent's rationale), the care decision, and every community booking
 for that patient with its own verdict ("Matches decision," "Doesn't match
-decision," or "Not checked") and a one-line reason, e.g. which keyword
-matched or why a booking was excluded (booked before discharge, or the
-decision was ambiguous). The status banner also explains the urgency score
-itself, e.g. "a confirmed gap on a note marked urgent → 100," not just the
-number.
+decision," or "Not checked") and the one-line reason the care-match agent
+gave for it, or why a booking was excluded before reaching that agent at all
+(booked before discharge, or the decision was ambiguous). The status banner
+also explains the urgency score itself, e.g. "a confirmed gap on a note
+marked urgent → 100," not just the number.
 
 Every discrepancy (a **Flagged** or **Needs review** result) also carries an
 urgency score, shown as a badge (e.g. "Urgent gap · 100"). It's driven mainly
