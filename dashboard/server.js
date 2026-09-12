@@ -195,7 +195,7 @@ function bookedCareFor(resources, patientId) {
 // confirmed against the live OpenAPI spec), retrying like upstream() does for
 // reads. Retrying a POST is only safe because callers reuse the same
 // Idempotency-Key across attempts, which per NHS-SIM's own docs is exactly
-// what it's for. Shared by both writes scheduleHomeVisit() makes below.
+// what it's for. Shared by every write scheduleHomeVisit() makes below.
 async function postAction(key, site, body, idempotencyKey) {
   const url = new URL(`/api/sites/${site}/actions`, SIMULATOR_URL);
   const requestInit = {
@@ -241,15 +241,37 @@ async function postAction(key, site, body, idempotencyKey) {
   return data;
 }
 
+// A created message is only *queued*: NHS-SIM's patient-facing view lists an
+// entry once its delivery is marked `delivered`, so without this second command
+// the SMS exists in the GP mailbox but the patient never sees it. `entryId` is
+// the outgoing entry inside the conversation, not the conversation's own id.
+async function deliverMessage(key, conversation, idempotencyKey) {
+  const outgoing = (conversation.data?.entries ?? []).find((entry) => entry.direction === 'outgoing');
+  if (!outgoing) throw new SimulatorError('Simulator did not return an outgoing message entry to deliver.');
+  await postAction(
+    key,
+    'gp',
+    {
+      type: 'messaging_action',
+      resourceId: conversation.id,
+      expectedVersion: conversation.version,
+      messagingCommand: { kind: 'delivery', entryId: outgoing.id, status: 'delivered' },
+    },
+    idempotencyKey
+  );
+}
+
 // The only write this tool performs: scheduling a community home visit via
 // NHS-SIM's `schedule_visit` action — and only after a human has reviewed
 // and confirmed the drafted title/text in the UI. As part of that same
 // confirmed action (not a separate, independently-triggered write), it also
-// sends the patient an SMS via the GP site's `messaging_action`, telling
-// them when the visit is booked for. A failure to send that SMS doesn't
-// undo or fail the booking, which already succeeded — it's reported back
-// via `notified: false` instead, so the UI can show it without risking a
-// duplicate booking from a retry.
+// sends the patient an SMS via the GP site's `messaging_action` — created,
+// then explicitly delivered, since a created message is only queued — telling
+// them when the visit is booked for. A failure at either step doesn't undo or
+// fail the booking, which already succeeded — it's reported back via
+// `notified: false` instead, so the UI can show it without risking a
+// duplicate booking from a retry. `notified` means the patient can actually
+// see the message, so a create that never delivers counts as false.
 async function scheduleHomeVisit(key, { patientId, title, text }, idempotencyKey) {
   const resource = await postAction(key, 'community', { type: 'schedule_visit', patientId, title, ...(text ? { text } : {}) }, idempotencyKey);
   const booking = normalizeCommunityResource(resource);
@@ -263,12 +285,13 @@ async function scheduleHomeVisit(key, { patientId, title, text }, idempotencyKey
 
   let notified = true;
   try {
-    await postAction(
+    const conversation = await postAction(
       key,
       'gp',
       { type: 'messaging_action', patientId, messagingCommand: { kind: 'create', subject: 'Home visit booked', body, channel: 'sms', allowReply: true } },
       `${idempotencyKey}-notify`
     );
+    await deliverMessage(key, conversation, `${idempotencyKey}-deliver`);
   } catch (err) {
     console.error('Home-visit SMS confirmation failed.');
     notified = false;

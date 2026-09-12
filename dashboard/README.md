@@ -87,12 +87,19 @@ Each transient POST retry gets a fresh timeout and reuses the same idempotency k
 Confirming calls NHS-SIM's `schedule_visit` action
 (`POST /api/sites/community/actions`) with an idempotency key, so a retried
 request after a network blip doesn't create a duplicate booking. As part of
-that same click, Careloop queues a simulated SMS confirming the visit, via NHS-SIM's `messaging_action` on the GP site. NHS-SIM queues this message; it does not send a real SMS.
+that same click, Careloop sends a simulated SMS confirming the visit, via NHS-SIM's `messaging_action` on the GP site. This takes two commands: a
+`create`, which only *queues* the message, then a `delivery` marking that
+message delivered. Both are needed — NHS-SIM's patient-facing view
+(`/wearables/messages/`) lists a message only once it is delivered, so a
+queued-but-undelivered SMS is invisible to the patient. NHS-SIM never sends a
+real SMS.
 The message uses the confirmed visit `dueAt` in Europe/London time; when
 no visit time is returned, it says the community team will confirm it separately.
 Record creation time is never presented as the appointment time. If the SMS
-can't be sent, the booking still stands (it's already been made); Careloop
-tells you so you can let the patient know another way. These two calls are
+can't be sent *or* can't be delivered, the booking still stands (it's already
+been made); Careloop reports `notified: false` so you can let the patient know
+another way — "notified" means the patient can actually see the message, not
+merely that it was queued. These three calls are
 the **only** writes Careloop performs — every other care type and every
 other NHS-SIM interaction stays read-only, and nothing is ever booked (or
 messaged) without an explicit click. See `AGENTS.md`'s clinical guardrails
