@@ -1,9 +1,25 @@
 {
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"python3 -m uvicorn dashboard.server:app --host 127.0.0.1 --port 8000 --reload\" \"vite --config dashboard/vite.config.js\"",
+    "dev:api": "python3 -m uvicorn dashboard.server:app --host 127.0.0.1 --port 8000 --reload",
+    "dev:web": "vite --config dashboard/vite.config.js",
+    "build": "vite build --config dashboard/vite.config.js",
+    "preview": "vite preview --config dashboard/vite.config.js",
+    "start": "python3 -m uvicorn dashboard.server:app --host 127.0.0.1 --port 3000",
+    "test": "node --test dashboard/src/model.test.js",
+    "agent": "node agent.js"
+  },
   "dependencies": {
     "@animahealth/adk": "^0.6.0",
+    "openai": "^5.23.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "tsx": "^4.23.13"
+    "@vitejs/plugin-react": "^5.0.2",
+    "concurrently": "^9.2.1",
+    "vite": "^7.1.5"
   }
 }

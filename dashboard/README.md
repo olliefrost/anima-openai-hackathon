@@ -1,0 +1,20 @@
+# Careloop
+
+Create a Python virtual environment and install the FastAPI backend from the repository root:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+npm run dev
+```
+
+Then open http://localhost:5173. Vite serves the React frontend and proxies `/api` requests to FastAPI on http://localhost:8000.
+
+The dashboard starts with explicitly labelled synthetic demo records. Click **Connect simulator** and enter your NHS-SIM team API key, or set `SIM_API_KEY` in the root `.env` and submit the connection form with its key field empty. This is separate from `OPENAI_API_KEY`.
+
+The local FastAPI server calls the documented read-only NHS-SIM `/api/team`, `/api/sites/{site}/view`, and `/api/sites/{site}/patients` endpoints for GP, pharmacy, and community care. It loads up to the API maximum of 500 resources per service and labels a service when more history exists; resource IDs in that working set are deduplicated by version. Failed sources are reported individually, and no sample data is mixed into live results. Credentials remain in memory or the server environment, never browser storage.
+
+Review flags and notes are saved in this browser, separated by simulator world. They do not update source records or mark clinical work completed. Refresh manually to fetch changes. Due dates use the simulator clock; undated open items older than 48 hours are labelled for review as a heuristic. Missing records or handoffs cannot be proven from these signals. Only patient-linked records appear in the worklist. Shared resources count once globally but in every service where visible.
+
+Run `npm test` to check deduplication and attention rules, and `npm run build` to create the production frontend in `dashboard/dist`. After building, `npm start` serves the complete app through FastAPI at http://localhost:3000. Both development servers bind to loopback only. API reference: https://sim.animahacks.com/docs/explorer/.
