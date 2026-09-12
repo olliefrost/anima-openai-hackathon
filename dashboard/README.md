@@ -32,6 +32,21 @@ The dashboard starts empty. Click **Connect simulator** and enter your NHS-SIM t
 A patient with no discharge summary at all is skipped by the sweep and shown
 as "No discharge summary found" for a direct check.
 
+For example, a discharge note whose follow-up section says "a physiotherapy
+appointment request is pending acknowledgement" decides `careType:
+physiotherapy`; if Community Care has no matching booking for that patient,
+that's a **Flagged** result, with the specific missing care type in the
+reason. A note with no community follow-up mentioned at all decides `careNeeded:
+false` and is **Matches** regardless of what else is booked for that patient —
+this tool checks the discharge decision against bookings, not the other way
+around.
+
+Care-type matching is text-based (keywords against a booking's title/kind),
+not exact. A manually scheduled visit with a bare title like "home visit
+follow-up" matches; one titled just "hi" or "moni" — real examples from
+NHS-SIM test data — won't, even if it's the right visit. Treat a **Flagged**
+result as "worth a human look," not a confirmed miss.
+
 ## What it doesn't do
 
 Careloop only reads from NHS-SIM (`hospital` documents, `community`

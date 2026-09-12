@@ -36,7 +36,10 @@ function getAgent() {
   const agent = app.agent({
     name: 'discharge_care_decision',
     model: openai('gpt-5.6-luna'),
-    context: [app.context.system(SYSTEM_PROMPT)],
+    // `history()` is what actually puts the prompt passed to `app.run()` (the
+    // discharge note + patient context) in front of the model — without it,
+    // only the system prompt is sent and the model has nothing to decide from.
+    context: [app.context.system(SYSTEM_PROMPT), app.context.history()],
     output: { schema: decisionSchema },
   });
   cached = { app, agent };
@@ -67,6 +70,10 @@ export async function evaluateDischargeNote({ sections, patient }) {
     throw new AgentError(`Discharge note evaluation failed: ${err.message}`);
   }
 
+  // `output: { schema }` already constrains the model's response, but ADK's
+  // structured output goes through a "forgiving" parser (coercion, partial
+  // matches) rather than a hard schema gate — re-validating here is the
+  // actual boundary check before an unvalidated shape reaches reconciliation.
   const parsed = decisionSchema.safeParse(result.output.value);
   if (!parsed.success) {
     throw new AgentError('Discharge note evaluation returned an unexpected shape.');

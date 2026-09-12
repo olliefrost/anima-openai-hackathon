@@ -11,6 +11,8 @@ const DIST = path.join(DASHBOARD, 'dist');
 const MAX_REQUEST_BYTES = 4096;
 const SIMULATOR_URL = 'https://sim.animahacks.com';
 const PORT = Number(process.env.PORT) || 8000;
+// Each check makes one OpenAI call; a full sweep can cover dozens of patients.
+// Batch it rather than firing every request at once or running one at a time.
 const SWEEP_CONCURRENCY = 5;
 
 try {
@@ -99,11 +101,16 @@ async function hospitalDischarges(key) {
     throw new SimulatorError('Unexpected simulator response.');
   }
   const patients = new Map((view.patients || []).map((patient) => [patient.id, patient]));
+  // A patient can have more than one discharge episode (different `id`s, e.g. a
+  // seeded example alongside a batch-generated one) — these are separate documents,
+  // not edits of one record, so `version` doesn't track which happened more recently.
+  // Compare by when the note was actually sent instead.
+  const dischargeTime = (doc) => doc.data?.sentAt ?? doc.createdAt ?? 0;
   const latest = new Map();
   for (const doc of view.resources) {
     if (doc.kind !== 'discharge-summary' || !doc.patientId) continue;
     const prior = latest.get(doc.patientId);
-    if (!prior || (doc.version ?? 0) > (prior.version ?? 0)) {
+    if (!prior || dischargeTime(doc) > dischargeTime(prior)) {
       latest.set(doc.patientId, doc);
     }
   }
@@ -125,13 +132,17 @@ async function findPatientById(key, patientId) {
 
 // Community resources for one patient, normalized into a common shape with
 // a best-effort `startsAt` so reconciliation can compare against discharge time.
+//
+// `/api/sites/community/appointments` looks like a per-patient booking list but
+// isn't: it's a single day's capacity schedule and 400s without a `date` param
+// ("A valid date is required"), so it can't be queried by patient. Booked care
+// (visits, care plans, care packages) is patient-linked and shows up in
+// `/api/sites/community/view` instead — the same source the original dashboard
+// used, before this tool existed.
 async function bookedCareFor(key, patientId) {
-  const [view, appointments] = await Promise.all([
-    upstream(key, '/api/sites/community/view', { offset: 0, limit: 500 }),
-    upstream(key, '/api/sites/community/appointments'),
-  ]);
+  const view = await upstream(key, '/api/sites/community/view', { offset: 0, limit: 500 });
 
-  const fromView = (view.resources || [])
+  return (view.resources || [])
     .filter((resource) => resource.patientId === patientId)
     .map((resource) => ({
       id: resource.id,
@@ -141,19 +152,6 @@ async function bookedCareFor(key, patientId) {
       startsAt: resource.dueAt ?? resource.createdAt,
       data: resource.data,
     }));
-
-  const fromAppointments = (appointments.appointments || [])
-    .filter((appointment) => appointment.patientId === patientId)
-    .map((appointment) => ({
-      id: appointment.id,
-      kind: appointment.kind || 'appointment',
-      title: appointment.title,
-      status: appointment.status,
-      startsAt: appointment.data?.startsAt ?? appointment.dueAt,
-      data: appointment.data,
-    }));
-
-  return [...fromView, ...fromAppointments];
 }
 
 async function runCheck(key, patientId, discharges) {
@@ -233,6 +231,10 @@ async function withKey(req, res, handler) {
   try {
     return await handler(key, payload);
   } catch (err) {
+    // SimulatorError/AgentError messages are written to be shown to the user
+    // (bad key, unreachable service, missing OPENAI_API_KEY). Anything else
+    // is unexpected internal failure — rethrow so the outer handler logs it
+    // and returns a generic 500 instead of leaking its message to the client.
     if (err instanceof SimulatorError || err instanceof AgentError) {
       return sendJson(res, 502, { error: err.message });
     }
@@ -314,6 +316,10 @@ const server = createServer(async (req, res) => {
 
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
 
+  // Only a browser sends an Origin header — a same-machine script hitting this
+  // API directly (curl, tests) has no origin to check and is already covered
+  // by the loopback-only bind above. This blocks a *different* origin's page
+  // from using the browser's fetch to reach these routes.
   if (pathname in ROUTES && req.headers.origin) {
     const port = req.socket.localPort;
     const allowedOrigins = new Set([
