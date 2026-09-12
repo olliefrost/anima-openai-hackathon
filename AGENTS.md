@@ -171,13 +171,36 @@ reference: `GET /api/catalogue`, human docs at `/docs/explorer/`, OpenAPI at
      ```json
      { "type": "messaging_action", "patientId": "SIM-000006", "messagingCommand": { "kind": "create", "subject": "Home visit booked", "body": "Your home visit has been booked for 13 September 2026, 14:00.", "channel": "sms", "allowReply": true } }
      ```
-     A failure here does not fail or retry the booking, which already
-     succeeded — `scheduleHomeVisit()` reports it back as `notified: false`
-     instead, so the UI can tell the reviewer to notify the patient another
-     way, without risking a duplicate visit from an automatic retry.
-  Both calls send an `Idempotency-Key` header (a stable string per attempted
-  write, e.g. `home-visit-<patientId>-<timestamp>-<random>`, with `-notify`
-  appended for the second call) — NHS-SIM's own docs say to reuse it when
+  3. `site: 'gp'`, `type: 'messaging_action'` again, with the `delivery`
+     command, fired immediately after (2) succeeds. **A `create` only
+     *queues* the message.** Confirmed live: NHS-SIM's patient-facing view
+     (`/wearables/messages/`) lists a conversation only once its outgoing
+     entry is marked `delivered` — every seeded message that shows there is
+     `queued > delivered`, and one seeded `queued > failed` message does not
+     show. Without this third call the SMS sits in the GP mailbox and the
+     patient never sees it:
+     ```json
+     { "type": "messaging_action", "resourceId": "r-4225", "expectedVersion": 1, "messagingCommand": { "kind": "delivery", "entryId": "r-4225-1", "status": "delivered" } }
+     ```
+     `entryId` is the **outgoing entry inside the conversation**
+     (`data.entries`), not the conversation's own id, and `expectedVersion`
+     is the conversation version returned by (2). The valid kind is
+     `delivery`, not `deliver`, and `entryId`/`status` are both required —
+     `status` is one of `delivered`/`failed`. The same command is also
+     available on the dedicated `POST /api/sites/gp/messages` route, where
+     the field is `command` rather than `messagingCommand`; it is **not**
+     accepted on `/api/sites/patient/messages`, which only takes
+     `patient_create` and `reply`.
+
+     A failure at (2) or (3) does not fail or retry the booking, which
+     already succeeded — `scheduleHomeVisit()` reports it back as
+     `notified: false` instead, so the UI can tell the reviewer to notify the
+     patient another way, without risking a duplicate visit from an automatic
+     retry. `notified: true` means the patient can actually see the message,
+     so a create that never delivers counts as false.
+  All three calls send an `Idempotency-Key` header (a stable string per
+  attempted write, e.g. `home-visit-<patientId>-<timestamp>-<random>`, with
+  `-notify` and `-deliver` appended for the second and third calls) — NHS-SIM's own docs say to reuse it when
   retrying an uncertain response and use a new one for a genuinely new
   action; the shared `postAction()` helper retries transient failures
   (network error, 502/503/504) with the same key for exactly this reason,
@@ -264,6 +287,19 @@ reference: `GET /api/catalogue`, human docs at `/docs/explorer/`, OpenAPI at
   fetch error or a 502/503/504, and fails fast on everything else (401, 403,
   or any other status) — don't remove that retry as unnecessary complexity,
   and don't widen it to retry on non-transient statuses.
+- **Writes are far slower than reads, and the timeouts differ accordingly.**
+  Measured live: `POST /api/sites/community/actions` with `schedule_visit`
+  took 19.0s and 13.2s to answer, while `GET /api/team` took 240ms. Writes
+  therefore use `WRITE_TIMEOUT_MS` (45s) and reads `READ_TIMEOUT_MS` (20s).
+  Don't collapse these back into one value: at a shared 20s cutoff a booking
+  aborted mid-flight, counted as a transient failure, and was re-sent —
+  making one ~15s call take ~34s, or fail after ~61s with a false "Cannot
+  reach NHS-SIM" against a simulator that was reachable and just slow.
+- **`409 No service capacity`** is what `schedule_visit` returns when the
+  community team has no slots left (`capacity-community` in the community
+  view carries `{ total, remaining }`; confirmed live at `remaining: 0`,
+  which blocks booking for *every* patient in that world). 409 is
+  deliberately not retried — it's a real refusal, not a transient failure.
 - **`communityResources()` fetches the whole community view once; `bookedCareFor()`
   is a pure filter over the result, not a fetch.** This split dates back to
   when `handleSweep` (since removed, see the project overview above) called
@@ -319,7 +355,9 @@ data supports:
   `schedule_visit`, and — as an inseparable part of that same booking, not a
   second independently-triggered write — sending the patient an SMS via the
   GP site's `messaging_action` telling them the date and time (see the API
-  reference above). Both only ever happen when a human has explicitly
+  reference above). The SMS costs two calls rather than one (`create` then
+  `delivery`) because NHS-SIM only queues a created message; that is one
+  exception implemented in two steps, not a third exception. Both only ever happen when a human has explicitly
   confirmed the drafted form in the UI — never automatically on their own
   trigger, never from a sweep or batch context, and never for any other care
   type or action. This pair was discussed and scoped deliberately; widening
@@ -336,7 +374,7 @@ data supports:
   duplicate visit for the same intent. The SMS reuses that key with a
   `-notify` suffix rather than getting its own independent one, so it stays
   traceable to the same booking intent.
-- A failed SMS send must never fail, retry, or duplicate the booking itself
+- A failed SMS send *or delivery* must never fail, retry, or duplicate the booking itself
   — the booking already succeeded and is the higher-stakes write. Surface it
   to the reviewer (`notified: false`) so they know to tell the patient
   another way, instead of silently dropping it or risking a double booking.
