@@ -1,17 +1,16 @@
 # Careloop
 
-Careloop is a local dashboard that gives NHS-SIM GP, pharmacy, and community-care
-staff one merged, patient-linked worklist instead of three separate systems to
-check. It pulls read-only data from the NHS-SIM simulator, deduplicates records
-that appear in more than one service, and flags items that look overdue,
-blocked, or stale so nothing sits unnoticed across a handoff.
+Careloop checks whether a patient's hospital discharge decision was actually
+followed up. For a patient ID (or every discharged patient at once) it reads
+the hospital discharge summary from NHS-SIM, uses an Anima ADK agent to
+structure the free-text decision into "is community follow-up care needed,
+and what kind," reads what community services actually booked, and flags a
+gap when the two don't line up.
 
-Careloop is a **review aid, not a clinical decision maker** — see the
-guardrails in [`AGENTS.md`](./AGENTS.md) before changing any status or
-attention logic.
-
-This repository also contains a small, unrelated Anima ADK/OpenAI CLI example
-in [`agent.js`](./agent.js), kept separate from the dashboard.
+Careloop is a **review aid, not a clinical decision maker** — it only reads
+NHS-SIM data and never books, cancels, or edits anything. See the guardrails
+in [`AGENTS.md`](./AGENTS.md) before changing the decision or reconciliation
+logic.
 
 ## Tech stack
 
@@ -19,10 +18,10 @@ in [`agent.js`](./agent.js), kept separate from the dashboard.
 |---|---|
 | Frontend | React 19 + Vite 7 (`dashboard/src`) |
 | Backend | Node (built-in `http`) serving the built frontend and proxying NHS-SIM (`dashboard/server.js`) |
+| Care-decision agent | `@animahealth/adk` + an OpenAI model, structured output (`dashboard/careAgent.js`) |
 | Domain logic | Plain JS functions, framework-free, in `dashboard/src/model.js` |
 | Tests | Node's built-in test runner (`node --test`) against `model.js` |
 | Dev orchestration | `concurrently` runs Vite and the Node server together (`npm run dev`) |
-| CLI example | `agent.js` — `@animahealth/adk` with an OpenAI model backend |
 
 ## Getting started
 
@@ -32,32 +31,26 @@ npm run dev        # Vite dev server at :5173, Node API at :8000
 ```
 
 Then open http://localhost:5173. See [`dashboard/README.md`](./dashboard/README.md)
-for full setup, environment variables, and the behavior of the simulator
-connection, review flags, and attention heuristics.
-
-For the OpenAI-backed CLI example:
-
-```sh
-npm run agent -- "your prompt"
-```
+for full setup, environment variables, and the check/sweep flow.
 
 ## Repository layout
 
 ```
 dashboard/            Careloop application (frontend + backend)
-  src/App.jsx         React UI, filtering, flags, notes, simulator connection
-  src/model.js         Pure aggregation, dedup, and attention rules
+  src/App.jsx         React UI — connect, check one patient, or sweep all
+  src/model.js         Pure reconciliation and care-type matching rules
   src/model.test.js    Tests for model.js
-  server.js            Loopback-only Node static server + NHS-SIM proxy
+  server.js            Loopback-only Node static server + NHS-SIM proxy + API routes
+  careAgent.js          ADK agent that structures a discharge note into a care decision
   README.md            Dashboard-specific setup and behavior notes
-agent.js              Standalone Anima ADK/OpenAI CLI example
-AGENTS.md             Conventions, guardrails, and commands for AI coding agents
+AGENTS.md             Conventions, NHS-SIM API reference, guardrails, and commands for AI coding agents
 CLAUDE.md             Points Claude Code at AGENTS.md
 ```
 
 ## Contributing / working with AI agents
 
 This repo is developed with AI coding assistants. Before making changes, read
-[`AGENTS.md`](./AGENTS.md) — it documents the required coding principles,
-environment/secrets handling, clinical-product guardrails, and testing
-expectations that apply to every change.
+[`AGENTS.md`](./AGENTS.md) — it documents the required coding principles, the
+NHS-SIM API reference gathered so far, environment/secrets handling,
+clinical-product guardrails, and testing expectations that apply to every
+change.

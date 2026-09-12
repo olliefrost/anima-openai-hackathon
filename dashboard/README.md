@@ -11,10 +11,37 @@ Then open http://localhost:5173. Vite serves the React frontend and proxies `/ap
 
 If startup reports `EADDRINUSE`, another Careloop dev session is already using ports 5173 and 8000. Use that session or stop it before running `npm run dev` again. Vite intentionally does not switch to another port because the API only accepts requests from the configured local frontend origin.
 
-The dashboard starts empty. Click **Connect simulator** and enter your NHS-SIM team API key, or set `SIM_API_KEY` in the root `.env` and submit the connection form with its key field empty. This is separate from `OPENAI_API_KEY`.
+The dashboard starts empty. Click **Connect simulator** and enter your NHS-SIM team API key, or set `SIM_API_KEY` in the root `.env` and submit the connection form with its key field empty. The care-decision agent needs `OPENAI_API_KEY` set in the same `.env`; this is a separate key from `SIM_API_KEY` and is only ever read on the server.
 
-The local Node server calls the documented read-only NHS-SIM `/api/team`, `/api/sites/{site}/view`, and `/api/sites/{site}/patients` endpoints for GP, pharmacy, and community care. It loads up to the API maximum of 500 resources per service and labels a service when more history exists; resource IDs in that working set are deduplicated by version. Failed sources are reported individually. Credentials remain in memory or the server environment, never browser storage.
+## What it does
 
-Review flags and notes are saved in this browser, separated by simulator world. They do not update source records or mark clinical work completed. Refresh manually to fetch changes. Due dates use the simulator clock; undated open items older than 48 hours are labelled for review as a heuristic. Missing records or handoffs cannot be proven from these signals. Only patient-linked records appear in the worklist. Shared resources count once globally but in every service where visible.
+- **Check one patient**: enter a patient ID (e.g. `SIM-000001`). Careloop
+  looks up their latest discharge summary from Hospital EPR documents,
+  passes the free-text sections to the care-decision agent, reads what
+  Community Care has booked for them, and shows whether the booking matches
+  the decision.
+- **Full sweep**: runs the same check for every patient who has a hospital
+  discharge summary, and lists them with a status:
+  - **Matches** — booked community care lines up with the decision.
+  - **Flagged** — care was decided as needed but nothing matching was
+    found booked after discharge.
+  - **Needs review** — the agent's decision was ambiguous, or the booked
+    care couldn't be confidently matched against the decided care type.
+    This is a "look at this yourself" signal, not a claimed match or gap.
 
-Run `npm test` to check deduplication and attention rules, and `npm run build` to create the production frontend in `dashboard/dist`. After building, `npm start` serves the complete app through the Node server at http://localhost:3000. Both development servers bind to loopback only. API reference: https://sim.animahacks.com/docs/explorer/.
+A patient with no discharge summary at all is skipped by the sweep and shown
+as "No discharge summary found" for a direct check.
+
+## What it doesn't do
+
+Careloop only reads from NHS-SIM (`hospital` documents, `community`
+bookings, and patient lookups) — it never books, cancels, edits, or messages
+a service on your behalf. A flag is a starting point for a human to check,
+not a confirmed missed handoff: missing a matching booking doesn't prove
+care wasn't arranged some other way.
+
+Run `npm test` to check the reconciliation and care-type matching rules, and
+`npm run build` to create the production frontend in `dashboard/dist`. After
+building, `npm start` serves the complete app through the Node server at
+http://localhost:3000. Both development servers bind to loopback only. API
+reference: https://sim.animahacks.com/docs/explorer/.
