@@ -21,9 +21,10 @@ export function createDecisionCache(evaluate, now = Date.now) {
   };
 }
 
-export async function checkSweep(patientIds, checkPatient) {
+export async function checkSweep(patientIds, checkPatient, onProgress = () => {}) {
   const results = new Array(patientIds.length);
   let next = 0;
+  let done = 0;
 
   async function worker() {
     while (next < patientIds.length) {
@@ -34,6 +35,7 @@ export async function checkSweep(patientIds, checkPatient) {
       } catch {
         results[index] = { patientId, status: 'check-failed', error: 'Patient check failed. Retry this patient individually.' };
       }
+      onProgress(++done, patientIds.length);
     }
   }
 

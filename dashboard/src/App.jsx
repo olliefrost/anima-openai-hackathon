@@ -1,14 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { urgencyLabel } from './model.js';
 import './sweep.css';
-
-// Same score bands as urgencyLabel() in model.js, just mapped to a badge
-// color instead of text.
-function urgencyBadgeClass(score) {
-  if (score >= 80) return 'red';
-  if (score >= 30) return 'amber';
-  return 'green';
-}
 
 function formatDate(timestamp) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
@@ -41,43 +32,16 @@ function newIdempotencyKey(patientId) {
   return `home-visit-${patientId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function UrgencyBadge({ score }) {
-  if (!score) return null;
-  return <span className={`badge ${urgencyBadgeClass(score)}`}>{urgencyLabel(score)} · {score}</span>;
-}
-
 function Sidebar({ activePage, onPageChange }) {
   return <aside className="sidebar">
     <a className="brand" href="/"><span className="brandmark">c</span> careloop<span className="branddot">●</span></a>
     <div className="workspace">HOME VISIT BOOKING</div>
-    <nav style={{ display: 'flex', flexDirection: 'column', gap: 8, margin: '16px 0' }}>
-      <button
-        onClick={() => onPageChange('sweep')}
-        style={{
-          padding: '8px 12px',
-          textAlign: 'left',
-          backgroundColor: activePage === 'sweep' ? '#f3f4f6' : 'transparent',
-          border: 'none',
-          borderRadius: 4,
-          cursor: 'pointer',
-          fontWeight: activePage === 'sweep' ? 600 : 400,
-        }}
-      >
+    <nav className="sidebar-nav" aria-label="Patient checks">
+      <button type="button" className={activePage === 'sweep' ? 'active' : ''} aria-current={activePage === 'sweep' ? 'page' : undefined} onClick={() => onPageChange('sweep')}>
         Full sweep
       </button>
-      <button
-        onClick={() => onPageChange('check')}
-        style={{
-          padding: '8px 12px',
-          textAlign: 'left',
-          backgroundColor: activePage === 'check' ? '#f3f4f6' : 'transparent',
-          border: 'none',
-          borderRadius: 4,
-          cursor: 'pointer',
-          fontWeight: activePage === 'check' ? 600 : 400,
-        }}
-      >
-        Check a patient
+      <button type="button" className={activePage === 'check' ? 'active' : ''} aria-current={activePage === 'check' ? 'page' : undefined} onClick={() => onPageChange('check')}>
+        Single patient
       </button>
     </nav>
   </aside>;
@@ -188,6 +152,7 @@ function BookingsList({ bookings }) {
 }
 
 function SweepPatient({ result, tone, onSelect }) {
+  const statusLabel = { flagged: 'Flagged', review: 'Needs review', ok: 'Matches' }[tone];
   return <button className={`sweep-patient ${tone}`} type="button" onClick={() => onSelect(result)}>
     <span>
       <strong>{result.patientName || result.patientId}</strong>
@@ -195,7 +160,7 @@ function SweepPatient({ result, tone, onSelect }) {
       <span className="hint">{result.reconciliation.reason}</span>
     </span>
     <span className="sweep-patient-meta">
-      <UrgencyBadge score={result.reconciliation.urgencyScore} />
+      <span className={`badge ${tone}`}>{statusLabel}</span>
       <span aria-hidden="true">View patient →</span>
     </span>
   </button>;
@@ -220,11 +185,11 @@ function SweepResults({ results, onSelect }) {
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 24 }}>
       <div className="summary-card">
         <div style={{ fontSize: 24, fontWeight: 'bold', color: '#dc2626' }}>{flagged.length}</div>
-        <p className="hint">Flagged gaps</p>
+        <p className="hint">Flagged</p>
       </div>
       <div className="summary-card">
         <div style={{ fontSize: 24, fontWeight: 'bold', color: '#f59e0b' }}>{review.length}</div>
-        <p className="hint">Need review</p>
+        <p className="hint">Needs review</p>
       </div>
       <div className="summary-card">
         <div style={{ fontSize: 24, fontWeight: 'bold', color: '#16a34a' }}>{ok.length}</div>
@@ -238,7 +203,7 @@ function SweepResults({ results, onSelect }) {
       </div>
     </div>}
     {review.length > 0 && <div>
-      <h3 style={{ color: '#f59e0b', marginBottom: 12 }}>Need review</h3>
+      <h3 style={{ color: '#f59e0b', marginBottom: 12 }}>Needs review</h3>
       <div style={{ display: 'grid', gap: 12, marginBottom: 24 }}>
         {review.map((r) => <SweepPatient key={r.patientId} result={r} tone="review" onSelect={onSelect} />)}
       </div>
@@ -285,6 +250,7 @@ export default function App() {
   const [sweepResults, setSweepResults] = useState(null);
   const [sweepLoading, setSweepLoading] = useState(false);
   const [sweepError, setSweepError] = useState('');
+  const [sweepProgress, setSweepProgress] = useState(null);
 
   const [patientIdInput, setPatientIdInput] = useState('');
   const [result, setResult] = useState(null);
@@ -321,10 +287,36 @@ export default function App() {
   }, []);
 
   async function runSweep() {
-    setSweepLoading(true); setSweepError(''); setSweepResults(null);
+    setSweepLoading(true); setSweepError(''); setSweepResults(null); setSweepProgress(null);
     try {
-      const data = await postJson('/api/sweep', { key });
-      setSweepResults(data.results);
+      const response = await fetch('/api/sweep', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Request failed.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let completed = false;
+      for (;;) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        let newlineIndex;
+        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line) continue;
+          const event = JSON.parse(line);
+          if (event.type === 'progress') setSweepProgress({ done: event.done, total: event.total });
+          if (event.type === 'done') {
+            setSweepResults(event.results);
+            completed = true;
+          }
+        }
+        if (done) break;
+      }
+      if (!completed) throw new Error('The sweep ended before all results were received.');
     } catch (error) {
       setSweepError(error.message);
     } finally { setSweepLoading(false); }
@@ -368,9 +360,22 @@ export default function App() {
         <div className="controls">
           <button className="button primary" disabled={!team || sweepLoading} onClick={runSweep}>{sweepLoading ? 'Running sweep…' : 'Run full sweep'}</button>
         </div>
+        {sweepLoading && <div className="sweep-progress-row">
+          <div
+            className="sweep-progress"
+            role="progressbar"
+            aria-label="Running full sweep"
+            aria-valuemin="0"
+            aria-valuemax={sweepProgress?.total || 1}
+            aria-valuenow={sweepProgress?.done || 0}
+          >
+            <div className="sweep-progress-bar" style={{ width: sweepProgress?.total ? `${(sweepProgress.done / sweepProgress.total) * 100}%` : '0%' }} />
+          </div>
+          <small>{sweepProgress ? `${sweepProgress.done}/${sweepProgress.total} checked` : 'Starting…'}</small>
+        </div>}
         {sweepError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{sweepError}</div>}
         {sweepResults && <div style={{ padding: '0 22px 24px' }}><SweepResults results={sweepResults} onSelect={showSweepPatient} /></div>}
-        {!sweepResults && !sweepError && <div className="empty">{sweepLoading ? 'Checking discharge summaries. This can take several minutes; results appear when all checks finish.' : team ? 'Click "Run full sweep" to check all discharge summaries.' : 'Connect your NHS-SIM team first.'}</div>}
+        {!sweepResults && !sweepError && <div className="empty">{sweepLoading ? 'Checking discharge summaries. Results appear when all checks finish.' : team ? 'Click "Run full sweep" to check all discharge summaries.' : 'Connect your NHS-SIM team first.'}</div>}
       </section>}
 
       {activePage === 'check' && <section className="worklist">

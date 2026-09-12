@@ -11,6 +11,8 @@ model judgments, not clinical approval or proof that care was delivered.
 2. `/api/check` validates a patient ID, reads hospital documents, then reads
    the paginated community view. `/api/sweep` reads both sources in parallel
    once, then runs up to twelve patient checks concurrently over shared data.
+   It streams newline-delimited JSON progress events after each completed
+   patient, followed by one event containing the finished result set.
 3. Only hospital discharge summaries with `status: "filed"` qualify. The
    latest is selected by `data.sentAt`/`createdAt`, never version. Patient
    context comes from the document response, with a patient-search fallback.
@@ -98,9 +100,11 @@ up to three attempts with backoff. Other statuses fail immediately. Each
 write attempt has a fresh timeout and retries reuse the same idempotency key;
 the SMS key is the booking key plus `-notify`.
 
-Simulator and agent errors surface through the API; unexpected errors return
-a generic internal error. Sweep failures are isolated per patient, listed for
-individual retry, and never counted as matches. Matching failures do not
+Simulator and agent errors before a sweep starts surface as JSON responses;
+unexpected errors return a generic internal error. Once sweep response headers
+are sent, patient results and progress stream together until the final event.
+Sweep failures are isolated per patient, listed for individual retry, and never
+counted as matches. Matching failures do not
 silently fall back to keyword matching or a booking opportunity.
 
 The server remains loopback-only, with origin checks, request limits, timeouts,

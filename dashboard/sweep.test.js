@@ -7,6 +7,7 @@ test('sweep checks 99 patients concurrently with a bounded worker pool and stabl
   let active = 0;
   let peak = 0;
   const seen = [];
+  const progress = [];
   const results = await checkSweep(ids, async (patientId) => {
     seen.push(patientId);
     peak = Math.max(peak, ++active);
@@ -14,7 +15,7 @@ test('sweep checks 99 patients concurrently with a bounded worker pool and stabl
     active--;
     if (patientId === 'demo-3') throw new Error('private upstream detail');
     return { patientId };
-  });
+  }, (done, total) => progress.push({ done, total }));
   assert.equal(peak, 12);
   assert.equal(seen.length, 99);
   assert.equal(new Set(seen).size, 99);
@@ -22,6 +23,7 @@ test('sweep checks 99 patients concurrently with a bounded worker pool and stabl
   assert.equal(results[3].status, 'check-failed');
   assert.ok(!results[3].error.includes('private'));
   assert.deepEqual(results[98], { patientId: 'demo-98' });
+  assert.deepEqual(progress, ids.map((_, index) => ({ done: index + 1, total: ids.length })));
 });
 
 test('empty sweep performs no patient checks', async () => {
