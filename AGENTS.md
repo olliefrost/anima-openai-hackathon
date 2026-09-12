@@ -9,6 +9,56 @@ Keep these concerns separate:
 - `dashboard/` is the Careloop application. It uses React and Vite with a FastAPI backend.
 - `agent.js` is an independent JavaScript ADK example.
 
+## Tech stack
+
+| Layer | Technology | Where |
+|---|---|---|
+| Frontend | React 19, Vite 7, ES modules | `dashboard/src/` |
+| Backend | FastAPI (Python), Uvicorn | `dashboard/server.py` |
+| Domain logic | Framework-free JS functions | `dashboard/src/model.js` |
+| Tests | Node built-in test runner (`node --test`) | `dashboard/src/model.test.js` |
+| Dev orchestration | `concurrently` (runs Vite + Uvicorn together) | `package.json` |
+| External data | NHS-SIM simulator (read-only HTTP API) | `dashboard/server.py` |
+| CLI example | `@animahealth/adk` + OpenAI model backend | `agent.js` |
+
+There is no separate state-management library, CSS framework, or ORM — keep
+it that way unless the user explicitly asks for one. Prefer the platform and
+existing dependencies over adding new ones.
+
+## Coding principles
+
+These apply to every change in this repository, in addition to the
+project-specific rules below:
+
+- **Simplicity first.** Solve the problem asked, not a generalized version of
+  it. Don't add abstractions, config flags, or framework layers for
+  hypothetical future needs. Three similar lines beat a premature helper.
+- **Explainable code over comments.** Prefer clear names and small, single-
+  purpose functions so the code reads on its own. Add a comment only when the
+  *why* isn't obvious from the code — a non-obvious constraint, an upstream
+  API quirk, a subtle invariant — never to restate *what* the code does.
+- **Match existing style.** Follow the conventions already used in the file
+  you're editing (naming, formatting, module structure). Don't reformat
+  unrelated code.
+- **No speculative error handling.** Validate at real boundaries (user input,
+  the NHS-SIM response, request bodies) as this codebase already does; don't
+  add defensive checks for conditions that can't occur internally.
+- **Keep domain logic pure and testable.** New aggregation, status, or
+  attention rules belong in `dashboard/src/model.js` as pure functions, not
+  scattered into `App.jsx` or `server.py`, so they stay unit-testable without
+  a browser or server.
+- **Security is not optional.** Preserve the server's loopback binding,
+  origin checks, request-size limit, timeouts, CSP headers, and `no-store`
+  responses. Never introduce `dangerouslySetInnerHTML`, string-built SQL/HTML,
+  or anything that would let upstream or user content execute as code.
+- **Document what changes.** If you add a route, environment variable,
+  heuristic, or user-visible behavior, update the relevant README
+  (`dashboard/README.md` for the dashboard, root `README.md` for repository-
+  wide changes) in the same change — see "Documentation" below.
+- **Verify before claiming done.** Run the tests and, for UI/server changes,
+  actually start `npm run dev` and exercise the affected flow. Don't report a
+  check as passed unless you ran it.
+
 ## Repository map
 
 - `dashboard/index.html` — Vite HTML entrypoint.
