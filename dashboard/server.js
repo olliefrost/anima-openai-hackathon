@@ -450,9 +450,18 @@ async function handleSweep(req, res) {
       hospitalDischarges(key),
       communityResources(key),
     ]);
-    const results = await checkSweep([...discharges.latest.keys()],
-      (patientId) => runCheck(key, patientId, discharges, resources));
-    return sendJson(res, 200, { results });
+    const patientIds = [...discharges.latest.keys()];
+    securityHeaders(res);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.writeHead(200);
+    res.write(`${JSON.stringify({ type: 'progress', done: 0, total: patientIds.length })}\n`);
+
+    const results = await checkSweep(
+      patientIds,
+      (patientId) => runCheck(key, patientId, discharges, resources),
+      (done, total) => res.write(`${JSON.stringify({ type: 'progress', done, total })}\n`)
+    );
+    res.end(`${JSON.stringify({ type: 'done', results })}\n`);
   });
 }
 

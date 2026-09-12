@@ -19,8 +19,10 @@ If `SIM_API_KEY` is set in the root `.env`, the dashboard connects to it automat
 each patient, with up to twelve patient evaluations running concurrently.
 Hospital documents and community bookings are fetched once each, in parallel,
 and shared across the sweep. This avoids waiting for every model call in
-sequence; total time still depends on model latency and rate limits. Results
-arrive when the sweep finishes. The results show the successful-check count
+sequence; total time still depends on model latency and rate limits. The route
+streams progress as newline-delimited JSON, and the UI shows the completed and
+total patient counts while results are running. Results arrive when the sweep
+finishes. The results show the successful-check count
 and list failed patient IDs for individual retry; failed checks are not matches.
 Select any flagged, review, or matching patient in the sweep to open the same
 patient-detail view used by an individual check, without running the model again.
