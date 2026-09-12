@@ -33,7 +33,12 @@ const MIME_TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-class SimulatorError extends Error {}
+class SimulatorError extends Error {
+  constructor(message, status = 502) {
+    super(message);
+    this.status = status;
+  }
+}
 
 function securityHeaders(res) {
   res.setHeader('Cache-Control', 'no-store');
@@ -59,6 +64,16 @@ async function sendFile(res, filePath, contentType) {
   res.end(data);
 }
 
+// NHS-SIM sits behind a Caddy reverse proxy (seen on every response's `via`
+// header) that occasionally answers a healthy backend with a bare, empty-body
+// 502 — confirmed live: the same request fails, then succeeds seconds later
+// with no other change. Every caller here is a read-only GET, so retrying a
+// handful of times is safe; only retry what's actually transient (a network/
+// timeout failure, or 502/503/504) and fail fast on everything else so a bad
+// key or a genuine permissions error doesn't wait out three attempts.
+const UPSTREAM_RETRIES = 3;
+const UPSTREAM_RETRY_DELAY_MS = 300;
+
 async function upstream(key, apiPath, params = {}) {
   const url = new URL(apiPath, SIMULATOR_URL);
   for (const [name, value] of Object.entries(params)) {
@@ -66,19 +81,29 @@ async function upstream(key, apiPath, params = {}) {
   }
 
   let response;
-  try {
-    response = await fetch(url, {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(20_000),
-    });
-  } catch {
-    throw new SimulatorError('Cannot reach NHS-SIM. Check your network and retry.');
+  for (let attempt = 1; attempt <= UPSTREAM_RETRIES; attempt++) {
+    let networkError = false;
+    try {
+      response = await fetch(url, {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(20_000),
+      });
+    } catch {
+      networkError = true;
+    }
+
+    const transient = networkError || [502, 503, 504].includes(response?.status);
+    if (!transient || attempt === UPSTREAM_RETRIES) {
+      if (networkError) throw new SimulatorError('Cannot reach NHS-SIM. Check your network and retry.', 504);
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, UPSTREAM_RETRY_DELAY_MS * attempt));
   }
 
   if (!response.ok) {
-    if (response.status === 401) throw new SimulatorError('Invalid simulator team key.');
-    if (response.status === 403) throw new SimulatorError('Team key does not have access to this service.');
-    throw new SimulatorError(`Simulator returned HTTP ${response.status}.`);
+    if (response.status === 401) throw new SimulatorError('Invalid simulator team key.', 401);
+    if (response.status === 403) throw new SimulatorError('Team key does not have access to this service.', 403);
+    throw new SimulatorError(`Simulator returned HTTP ${response.status}.`, 502);
   }
 
   let data;
@@ -139,10 +164,13 @@ async function findPatientById(key, patientId) {
 // (visits, care plans, care packages) is patient-linked and shows up in
 // `/api/sites/community/view` instead — the same source the original dashboard
 // used, before this tool existed.
-async function bookedCareFor(key, patientId) {
+async function communityResources(key) {
   const view = await upstream(key, '/api/sites/community/view', { offset: 0, limit: 500 });
+  return view.resources || [];
+}
 
-  return (view.resources || [])
+function bookedCareFor(resources, patientId) {
+  return resources
     .filter((resource) => resource.patientId === patientId)
     .map((resource) => ({
       id: resource.id,
@@ -154,7 +182,7 @@ async function bookedCareFor(key, patientId) {
     }));
 }
 
-async function runCheck(key, patientId, discharges) {
+async function runCheck(key, patientId, discharges, resources) {
   const doc = discharges.latest.get(patientId);
   const patient = discharges.patients.get(patientId) ?? (await findPatientById(key, patientId));
 
@@ -163,7 +191,7 @@ async function runCheck(key, patientId, discharges) {
   }
 
   const decision = await evaluateDischargeNote({ sections: doc.data?.sections, patient });
-  const bookings = await bookedCareFor(key, patientId);
+  const bookings = bookedCareFor(resources, patientId);
   const dischargeAt = doc.data?.sentAt ?? doc.createdAt;
   const reconciliation = reconcile(decision, bookings, dischargeAt);
 
@@ -236,7 +264,13 @@ async function withKey(req, res, handler) {
     // is unexpected internal failure — rethrow so the outer handler logs it
     // and returns a generic 500 instead of leaking its message to the client.
     if (err instanceof SimulatorError || err instanceof AgentError) {
-      return sendJson(res, 502, { error: err.message });
+      // Distinct statuses (401 bad key, 403 no access, 504 unreachable, 502
+      // upstream failure) so a real sim/network problem doesn't look
+      // identical to a bad key in the network tab — log server-side too,
+      // since the message names which dependency failed and never contains
+      // a key or patient data.
+      console.error(`${req.url}: ${err.message}`);
+      return sendJson(res, err.status ?? 502, { error: err.message });
     }
     throw err;
   }
@@ -254,19 +288,43 @@ async function handleCheck(req, res) {
     const patientId = typeof payload.patientId === 'string' ? payload.patientId.trim() : '';
     if (!patientId) return sendJson(res, 400, { error: 'patientId is required.' });
     const discharges = await hospitalDischarges(key);
-    const result = await runCheck(key, patientId, discharges);
+    const resources = await communityResources(key);
+    const result = await runCheck(key, patientId, discharges, resources);
     return sendJson(res, 200, result);
   });
+}
+
+// One patient's failure (a sim blip that outlasted the retries, an agent
+// error) shouldn't discard everyone else's results — it's reported as its own
+// row instead of failing the whole sweep. An unexpected error (not one of our
+// own upstream/agent error types) still rethrows, so a real bug keeps
+// surfacing as a 500 rather than being silently swallowed per-patient.
+async function runCheckTolerant(key, patientId, discharges, resources) {
+  try {
+    return await runCheck(key, patientId, discharges, resources);
+  } catch (err) {
+    if (err instanceof SimulatorError || err instanceof AgentError) {
+      console.error(`Sweep check failed for ${patientId}: ${err.message}`);
+      return { patientId, patientName: discharges.patients.get(patientId)?.name ?? null, status: 'check-failed', error: err.message };
+    }
+    throw err;
+  }
 }
 
 async function handleSweep(req, res) {
   return withKey(req, res, async (key) => {
     const discharges = await hospitalDischarges(key);
+    // Fetched once for the whole sweep, not per patient — the same community
+    // view would otherwise be refetched dozens of times over, which both
+    // wastes requests and widens the window a transient sim blip can land in.
+    const resources = await communityResources(key);
     const patientIds = [...discharges.latest.keys()];
     const results = [];
     for (let offset = 0; offset < patientIds.length; offset += SWEEP_CONCURRENCY) {
       const batch = await Promise.all(
-        patientIds.slice(offset, offset + SWEEP_CONCURRENCY).map((patientId) => runCheck(key, patientId, discharges))
+        patientIds
+          .slice(offset, offset + SWEEP_CONCURRENCY)
+          .map((patientId) => runCheckTolerant(key, patientId, discharges, resources))
       );
       results.push(...batch);
     }

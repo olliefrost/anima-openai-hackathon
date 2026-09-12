@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { urgencyLabel } from './model.js';
 
 const STATUS_META = {
@@ -6,6 +6,7 @@ const STATUS_META = {
   flag: { label: 'Flagged', className: 'red' },
   review: { label: 'Needs review', className: 'amber' },
   'no-discharge-summary': { label: 'No discharge summary', className: '' },
+  'check-failed': { label: 'Check failed', className: 'red' },
 };
 
 // Same score bands as urgencyLabel() in model.js, just mapped to a badge
@@ -62,7 +63,7 @@ function ConnectionDialog({ dialogRef, loading, error, onConnect }) {
       <div className="dialog-top"><h2>Connect your team</h2><button type="button" className="icon-button" onClick={() => dialogRef.current?.close()} aria-label="Close">×</button></div>
       <p>Use the team API key from <a href="https://sim.animahacks.com/control/" target="_blank" rel="noreferrer">NHS-SIM → Team &amp; API key</a>. The care-decision agent uses a separate OpenAI key set on the server.</p>
       <label htmlFor="key">Simulator team API key</label>
-      <input id="key" type="password" autoComplete="off" value={candidate} onChange={(event) => setCandidate(event.target.value)} placeholder="Paste team key, or use SIM_API_KEY from .env" />
+      <input id="key" type="password" autoComplete="off" value={candidate} onChange={(event) => setCandidate(event.target.value)} placeholder="Paste team key (leave empty to use SIM_API_KEY from .env)" />
       <p className="hint">The key is kept in memory for this session and sent only through the local server to NHS-SIM.</p>
       <div className="error-text" role="alert">{error}</div>
       <button className="button primary" disabled={loading}>{loading ? 'Connecting…' : 'Connect workspace'}</button>
@@ -84,6 +85,9 @@ function BookingsList({ bookings }) {
 function ResultDetail({ result }) {
   if (result.status === 'no-discharge-summary') {
     return <div className="empty">No discharge summary found for {result.patientName || result.patientId} in Hospital EPR documents.</div>;
+  }
+  if (result.status === 'check-failed') {
+    return <div className="error-text" role="alert">Couldn't complete this check: {result.error}. Try running it again.</div>;
   }
   return <>
     <div className="detail-alert">
@@ -119,9 +123,11 @@ export default function App() {
   const [team, setTeam] = useState(null);
   const [key, setKey] = useState('');
   const [loading, setLoading] = useState(false);
+  const [connecting, setConnecting] = useState(true);
   const [connectError, setConnectError] = useState('');
   const connectionDialog = useRef(null);
   const detailDialog = useRef(null);
+  const autoConnectStarted = useRef(false);
 
   const [patientIdInput, setPatientIdInput] = useState('');
   const [singleResult, setSingleResult] = useState(null);
@@ -160,6 +166,16 @@ export default function App() {
     } finally { setLoading(false); }
   }
 
+  // Try SIM_API_KEY from .env on load so a configured key never requires
+  // opening the dialog by hand. A ref guards this (rather than an empty
+  // dependency array alone) because StrictMode intentionally double-invokes
+  // effects in development, which would otherwise fire /api/connect twice.
+  useEffect(() => {
+    if (autoConnectStarted.current) return;
+    autoConnectStarted.current = true;
+    connect('').finally(() => setConnecting(false));
+  }, []);
+
   async function runSingleCheck(event) {
     event.preventDefault();
     const patientId = patientIdInput.trim();
@@ -184,18 +200,23 @@ export default function App() {
     } finally { setSweepLoading(false); }
   }
 
+  // A row can be `check-failed` (a tool failure, not a clinical finding) and
+  // has no `reconciliation` at all — read its status/urgency defensively so
+  // one bad patient doesn't crash the summary counts or the sort.
   const counts = sweepResults ? {
     all: sweepResults.length,
-    flag: sweepResults.filter((r) => r.reconciliation.status === 'flag').length,
-    review: sweepResults.filter((r) => r.reconciliation.status === 'review').length,
-    ok: sweepResults.filter((r) => r.reconciliation.status === 'ok').length,
+    flag: sweepResults.filter((r) => r.reconciliation?.status === 'flag').length,
+    review: sweepResults.filter((r) => r.reconciliation?.status === 'review').length,
+    ok: sweepResults.filter((r) => r.reconciliation?.status === 'ok').length,
   } : { all: 0, flag: 0, review: 0, ok: 0 };
 
   const filteredSweep = (sweepResults || [])
-    .filter((r) => statusFilter === 'all' || r.reconciliation.status === statusFilter)
+    .filter((r) => statusFilter === 'all' || r.reconciliation?.status === statusFilter || r.status === statusFilter)
     .filter((r) => `${r.patientName || ''} ${r.patientId}`.toLowerCase().includes(search.toLowerCase()))
     // Highest urgency first — this is the ranking the sweep exists to produce.
-    .sort((a, b) => b.reconciliation.urgencyScore - a.reconciliation.urgencyScore);
+    // A `check-failed` row has no reconciliation to rank, so it sorts as 0
+    // (alongside `ok`) rather than crashing the sort.
+    .sort((a, b) => (b.reconciliation?.urgencyScore ?? 0) - (a.reconciliation?.urgencyScore ?? 0));
 
   const metrics = [
     ['Checked', counts.all, 'Patients with a discharge summary', 'all'],
@@ -207,9 +228,9 @@ export default function App() {
   return <>
     <Sidebar view={view} setView={setView} />
     <main>
-      <header><div className="breadcrumb">Workspace <span>/</span> {view === 'single' ? 'Check one patient' : 'Full sweep'}</div><button className="button" onClick={showConnection}>{team ? `Connected · ${team.world}` : 'Connect simulator ↗'}</button></header>
+      <header><div className="breadcrumb">Workspace <span>/</span> {view === 'single' ? 'Check one patient' : 'Full sweep'}</div><button className="button" onClick={showConnection}>{team ? `Connected · ${team.world}` : connecting ? 'Connecting…' : 'Connect simulator ↗'}</button></header>
       <section className="heading"><div><div className="eyebrow">DISCHARGE → COMMUNITY CARE</div><h1>Did the right care get booked?</h1><p>Extracts the discharge decision, then checks it against what community services actually booked.</p></div></section>
-      <div className="notice" role="status">{team ? <><span className="connection-dot" /> Connected to <strong>{team.world}</strong></> : 'Not connected. Connect your NHS-SIM team to run a check.'}</div>
+      <div className="notice" role="status">{team ? <><span className="connection-dot" /> Connected to <strong>{team.world}</strong></> : connecting ? 'Connecting to NHS-SIM…' : 'Not connected. Connect your NHS-SIM team to run a check.'}</div>
 
       {view === 'single' && <section className="worklist">
         <div className="section-title"><div><h2>Check one patient</h2><p>Looks up the latest hospital discharge summary for this patient ID.</p></div></div>
@@ -230,7 +251,7 @@ export default function App() {
           <div className="section-title"><div><h2>Full sweep <span>{filteredSweep.length}</span></h2><p>{sweepCheckedAt ? `Checked ${formatDate(sweepCheckedAt)}` : 'Runs a check for every patient with a hospital discharge summary.'}</p></div><button className="button primary" disabled={!team || sweepLoading} onClick={runSweep}>{sweepLoading ? 'Checking all patients…' : 'Run full sweep'}</button></div>
           <div className="controls"><div className="filters"><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search patient…" aria-label="Search patient" /></div></div>
           {sweepError && <div className="error-text" role="alert" style={{ padding: '0 22px 16px' }}>{sweepError}</div>}
-          {sweepResults && <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Discharge note</th><th>Decision</th><th>Booked care</th><th>Status</th><th>Urgency</th></tr></thead><tbody>{filteredSweep.map((result) => { const name = result.patientName || result.patientId; const initials = name.split(' ').slice(0, 2).map((part) => part[0]).join(''); return <tr key={result.patientId}><td><button className="patient-button" onClick={() => showDetail(result)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{result.patientId}</small></span></button></td><td><button className="task-button" onClick={() => showDetail(result)}>{result.dischargeSummary.title}</button><small>{formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)}</small></td><td>{formatCareType(result.decision.careType)}<small>{result.decision.careNeeded ? `${result.decision.confidence} confidence` : 'No care needed'}</small></td><td>{result.bookings.length} record{result.bookings.length === 1 ? '' : 's'}</td><td><StatusBadge status={result.reconciliation.status} /></td><td><UrgencyBadge score={result.reconciliation.urgencyScore} /></td></tr>; })}</tbody></table></div>}
+          {sweepResults && <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Discharge note</th><th>Decision</th><th>Booked care</th><th>Status</th><th>Urgency</th></tr></thead><tbody>{filteredSweep.map((result) => { const name = result.patientName || result.patientId; const initials = name.split(' ').slice(0, 2).map((part) => part[0]).join(''); const failed = result.status === 'check-failed'; return <tr key={result.patientId}><td><button className="patient-button" onClick={() => showDetail(result)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{result.patientId}</small></span></button></td>{failed ? <td colSpan={3}><button className="task-button" onClick={() => showDetail(result)}>Couldn't complete this check</button><small>{result.error}</small></td> : <><td><button className="task-button" onClick={() => showDetail(result)}>{result.dischargeSummary.title}</button><small>{formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)}</small></td><td>{formatCareType(result.decision.careType)}<small>{result.decision.careNeeded ? `${result.decision.confidence} confidence` : 'No care needed'}</small></td><td>{result.bookings.length} record{result.bookings.length === 1 ? '' : 's'}</td></>}<td><StatusBadge status={result.reconciliation?.status ?? result.status} /></td><td><UrgencyBadge score={result.reconciliation?.urgencyScore ?? 0} /></td></tr>; })}</tbody></table></div>}
           {sweepResults && filteredSweep.length === 0 && <div className="empty">No matching patients.<p>Try a different filter or search.</p></div>}
           {!sweepResults && !sweepError && <div className="empty">{team ? 'Run a full sweep to check every discharged patient.' : 'Connect your NHS-SIM team first.'}</div>}
         </section>

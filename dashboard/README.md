@@ -11,7 +11,7 @@ Then open http://localhost:5173. Vite serves the React frontend and proxies `/ap
 
 If startup reports `EADDRINUSE`, another Careloop dev session is already using ports 5173 and 8000. Use that session or stop it before running `npm run dev` again. Vite intentionally does not switch to another port because the API only accepts requests from the configured local frontend origin.
 
-The dashboard starts empty. Click **Connect simulator** and enter your NHS-SIM team API key, or set `SIM_API_KEY` in the root `.env` and submit the connection form with its key field empty. The care-decision agent needs `OPENAI_API_KEY` set in the same `.env`; this is a separate key from `SIM_API_KEY` and is only ever read on the server.
+If `SIM_API_KEY` is set in the root `.env`, the dashboard connects to it automatically on load — no dialog needed. Without one set, it opens **Connect simulator** for you to paste your NHS-SIM team API key by hand. The care-decision agent needs `OPENAI_API_KEY` set in the same `.env`; this is a separate key from `SIM_API_KEY` and is only ever read on the server.
 
 ## What it does
 
@@ -31,6 +31,11 @@ The dashboard starts empty. Click **Connect simulator** and enter your NHS-SIM t
 
 A patient with no discharge summary at all is skipped by the sweep and shown
 as "No discharge summary found" for a direct check.
+
+A patient whose check couldn't be completed (a transient NHS-SIM error that
+outlasted the built-in retries, or an agent failure) shows as "Check failed"
+with the reason, instead of failing the whole sweep — re-run the sweep, or
+check that one patient directly, to retry it.
 
 For example, a discharge note whose follow-up section says "a physiotherapy
 appointment request is pending acknowledgement" decides `careType:

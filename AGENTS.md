@@ -195,6 +195,22 @@ any write call).
 - World state resets are possible between hackathon sessions — sample IDs
   above (e.g. `SIM-000001`) may not exist in every world; always resolve
   patients by whatever your connected team's `/api/team` world actually has.
+- **The simulator sits behind a Caddy reverse proxy** (`via: 1.1 Caddy` on
+  every response) that intermittently answers a healthy backend with a bare,
+  empty-body `502`. Confirmed live: the same request failed, then succeeded
+  seconds later with nothing else changed; a 60-request burst across
+  `/api/team`, hospital documents, and community view came back 60/60 clean.
+  `upstream()` in `server.js` retries a request up to 3 times on a thrown
+  fetch error or a 502/503/504, and fails fast on everything else (401, 403,
+  or any other status) — don't remove that retry as unnecessary complexity,
+  and don't widen it to retry on non-transient statuses.
+- **The community view (`/api/sites/community/view`) is fetched once per
+  check or sweep, not once per patient.** `handleSweep` used to call
+  `bookedCareFor()` — which fetched the whole view again — inside every
+  per-patient `runCheck`, turning a sweep over ~60 patients into ~60 identical
+  ~22KB requests. `communityResources()` now fetches it once and
+  `bookedCareFor()` is a pure filter over the result; don't reintroduce a
+  per-patient fetch here.
 
 ## Anima ADK usage notes (handoff notes)
 
