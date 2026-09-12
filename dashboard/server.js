@@ -2,19 +2,21 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { reconcile } from './src/model.js';
+import { evaluateDischargeNote, AgentError } from './careAgent.js';
 
 const DASHBOARD = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(DASHBOARD);
 const DIST = path.join(DASHBOARD, 'dist');
-const SITES = ['gp', 'pharmacy', 'community'];
 const MAX_REQUEST_BYTES = 4096;
 const SIMULATOR_URL = 'https://sim.animahacks.com';
 const PORT = Number(process.env.PORT) || 8000;
+const SWEEP_CONCURRENCY = 5;
 
 try {
   process.loadEnvFile(path.join(ROOT, '.env'));
 } catch {
-  // .env is optional; SIM_API_KEY may already be present in the environment.
+  // .env is optional; SIM_API_KEY/OPENAI_API_KEY may already be present in the environment.
 }
 
 const MIME_TYPES = {
@@ -89,36 +91,99 @@ async function upstream(key, apiPath, params = {}) {
   return data;
 }
 
-async function patientsFor(site, resources, key) {
-  const patientIds = [...new Set(resources.map((resource) => resource.patientId).filter(Boolean))];
-
-  async function findPatient(patientId) {
-    const page = await upstream(key, `/api/sites/${site}/patients`, { q: patientId, offset: 0 });
-    if (!Array.isArray(page.items)) {
-      throw new SimulatorError('Unexpected simulator patient response.');
-    }
-    return page.items.find((patient) => patient.id === patientId) ?? null;
-  }
-
-  const patients = [];
-  for (let offset = 0; offset < patientIds.length; offset += 10) {
-    const batch = await Promise.all(patientIds.slice(offset, offset + 10).map(findPatient));
-    patients.push(...batch.filter((patient) => patient !== null));
-  }
-  return patients;
-}
-
-async function siteData(site, key) {
-  const view = await upstream(key, `/api/sites/${site}/view`, { offset: 0, limit: 500 });
+// Latest discharge-summary document per patient, plus the patient directory
+// the hospital returned alongside those documents.
+async function hospitalDischarges(key) {
+  const view = await upstream(key, '/api/sites/hospital/documents', { offset: 0, limit: 500 });
   if (!Array.isArray(view.resources)) {
     throw new SimulatorError('Unexpected simulator response.');
   }
-  const patients = await patientsFor(site, view.resources, key);
-  const resourceTotal = view.resourceTotal ?? view.resources.length;
-  if (typeof resourceTotal !== 'number') {
-    throw new SimulatorError('Unexpected simulator response.');
+  const patients = new Map((view.patients || []).map((patient) => [patient.id, patient]));
+  const latest = new Map();
+  for (const doc of view.resources) {
+    if (doc.kind !== 'discharge-summary' || !doc.patientId) continue;
+    const prior = latest.get(doc.patientId);
+    if (!prior || (doc.version ?? 0) > (prior.version ?? 0)) {
+      latest.set(doc.patientId, doc);
+    }
   }
-  return { ...view, patients, truncated: view.resources.length < resourceTotal };
+  return { latest, patients };
+}
+
+async function findPatientById(key, patientId) {
+  for (const site of ['hospital', 'gp', 'community']) {
+    try {
+      const page = await upstream(key, `/api/sites/${site}/patients`, { q: patientId, offset: 0 });
+      const match = (page.items || []).find((patient) => patient.id === patientId);
+      if (match) return match;
+    } catch {
+      // Try the next site; a lookup failure here shouldn't fail the whole check.
+    }
+  }
+  return null;
+}
+
+// Community resources for one patient, normalized into a common shape with
+// a best-effort `startsAt` so reconciliation can compare against discharge time.
+async function bookedCareFor(key, patientId) {
+  const [view, appointments] = await Promise.all([
+    upstream(key, '/api/sites/community/view', { offset: 0, limit: 500 }),
+    upstream(key, '/api/sites/community/appointments'),
+  ]);
+
+  const fromView = (view.resources || [])
+    .filter((resource) => resource.patientId === patientId)
+    .map((resource) => ({
+      id: resource.id,
+      kind: resource.kind,
+      title: resource.title,
+      status: resource.status,
+      startsAt: resource.dueAt ?? resource.createdAt,
+      data: resource.data,
+    }));
+
+  const fromAppointments = (appointments.appointments || [])
+    .filter((appointment) => appointment.patientId === patientId)
+    .map((appointment) => ({
+      id: appointment.id,
+      kind: appointment.kind || 'appointment',
+      title: appointment.title,
+      status: appointment.status,
+      startsAt: appointment.data?.startsAt ?? appointment.dueAt,
+      data: appointment.data,
+    }));
+
+  return [...fromView, ...fromAppointments];
+}
+
+async function runCheck(key, patientId, discharges) {
+  const doc = discharges.latest.get(patientId);
+  const patient = discharges.patients.get(patientId) ?? (await findPatientById(key, patientId));
+
+  if (!doc) {
+    return { patientId, patientName: patient?.name ?? null, status: 'no-discharge-summary' };
+  }
+
+  const decision = await evaluateDischargeNote({ sections: doc.data?.sections, patient });
+  const bookings = await bookedCareFor(key, patientId);
+  const dischargeAt = doc.data?.sentAt ?? doc.createdAt;
+  const reconciliation = reconcile(decision, bookings, dischargeAt);
+
+  return {
+    patientId,
+    patientName: patient?.name ?? null,
+    dischargeSummary: {
+      id: doc.id,
+      title: doc.title,
+      createdAt: doc.createdAt,
+      sentAt: doc.data?.sentAt,
+      sentBy: doc.data?.sentBy,
+      sections: doc.data?.sections,
+    },
+    decision,
+    bookings,
+    reconciliation,
+  };
 }
 
 async function readBody(req) {
@@ -136,48 +201,75 @@ async function readBody(req) {
   return Buffer.concat(chunks);
 }
 
-async function handleGetData(req, res) {
-  let body;
+async function readJsonBody(req) {
+  const body = await readBody(req);
+  if (body.length === 0) return {};
   try {
-    body = await readBody(req);
+    return JSON.parse(body.toString('utf8'));
+  } catch {
+    const error = new Error('Invalid request.');
+    error.status = 400;
+    throw error;
+  }
+}
+
+function resolveKey(payload) {
+  return (typeof payload === 'object' && payload !== null ? payload.key : null) || process.env.SIM_API_KEY || null;
+}
+
+async function withKey(req, res, handler) {
+  let payload;
+  try {
+    payload = await readJsonBody(req);
   } catch (err) {
     return sendJson(res, err.status ?? 400, { error: err.message });
   }
 
-  let payload = {};
-  if (body.length > 0) {
-    try {
-      payload = JSON.parse(body.toString('utf8'));
-    } catch {
-      return sendJson(res, 400, { error: 'Invalid request.' });
-    }
-  }
-
-  const key = (typeof payload === 'object' && payload !== null ? payload.key : null) || process.env.SIM_API_KEY;
-  if (typeof key !== 'string' || !key) {
+  const key = resolveKey(payload);
+  if (!key) {
     return sendJson(res, 401, { error: 'Enter your NHS-SIM team API key, or set SIM_API_KEY in .env.' });
   }
 
   try {
-    const team = await upstream(key, '/api/team');
-
-    const sources = await Promise.all(
-      SITES.map(async (site) => {
-        try {
-          return { site, ...(await siteData(site, key)) };
-        } catch (err) {
-          return { site, error: err.message, resources: [], patients: [] };
-        }
-      })
-    );
-
-    return sendJson(res, 200, { team, sources, fetchedAt: Date.now() });
+    return await handler(key, payload);
   } catch (err) {
-    if (err instanceof SimulatorError) {
+    if (err instanceof SimulatorError || err instanceof AgentError) {
       return sendJson(res, 502, { error: err.message });
     }
     throw err;
   }
+}
+
+async function handleConnect(req, res) {
+  return withKey(req, res, async (key) => {
+    const team = await upstream(key, '/api/team');
+    return sendJson(res, 200, { team });
+  });
+}
+
+async function handleCheck(req, res) {
+  return withKey(req, res, async (key, payload) => {
+    const patientId = typeof payload.patientId === 'string' ? payload.patientId.trim() : '';
+    if (!patientId) return sendJson(res, 400, { error: 'patientId is required.' });
+    const discharges = await hospitalDischarges(key);
+    const result = await runCheck(key, patientId, discharges);
+    return sendJson(res, 200, result);
+  });
+}
+
+async function handleSweep(req, res) {
+  return withKey(req, res, async (key) => {
+    const discharges = await hospitalDischarges(key);
+    const patientIds = [...discharges.latest.keys()];
+    const results = [];
+    for (let offset = 0; offset < patientIds.length; offset += SWEEP_CONCURRENCY) {
+      const batch = await Promise.all(
+        patientIds.slice(offset, offset + SWEEP_CONCURRENCY).map((patientId) => runCheck(key, patientId, discharges))
+      );
+      results.push(...batch);
+    }
+    return sendJson(res, 200, { results, checkedAt: Date.now() });
+  });
 }
 
 async function handleStatic(req, res, pathname) {
@@ -208,6 +300,12 @@ async function handleStatic(req, res, pathname) {
   }
 }
 
+const ROUTES = {
+  '/api/connect': handleConnect,
+  '/api/check': handleCheck,
+  '/api/sweep': handleSweep,
+};
+
 const server = createServer(async (req, res) => {
   const hostname = (req.headers.host ?? '').split(':')[0];
   if (!['localhost', '127.0.0.1'].includes(hostname)) {
@@ -216,7 +314,7 @@ const server = createServer(async (req, res) => {
 
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
 
-  if (pathname === '/api/data' && req.headers.origin) {
+  if (pathname in ROUTES && req.headers.origin) {
     const port = req.socket.localPort;
     const allowedOrigins = new Set([
       `http://localhost:${port}`,
@@ -230,8 +328,8 @@ const server = createServer(async (req, res) => {
   }
 
   try {
-    if (pathname === '/api/data' && req.method === 'POST') {
-      await handleGetData(req, res);
+    if (pathname in ROUTES && req.method === 'POST') {
+      await ROUTES[pathname](req, res);
     } else {
       await handleStatic(req, res, pathname);
     }
