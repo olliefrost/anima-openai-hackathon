@@ -83,6 +83,10 @@ can:
 Booking uses the same in-memory simulator team key as the patient check.
 An empty optional note is omitted to meet the simulator request schema.
 Each transient POST retry gets a fresh timeout and reuses the same idempotency key.
+Writes get a longer timeout than reads (45s vs 20s): the simulator's
+`schedule_visit` takes 13-19s just to answer, so the shorter read timeout used
+to abort a booking mid-flight and re-send it, or report an unreachable
+simulator that was merely slow.
 
 Confirming calls NHS-SIM's `schedule_visit` action
 (`POST /api/sites/community/actions`) with an idempotency key, so a retried

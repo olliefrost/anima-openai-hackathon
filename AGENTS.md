@@ -287,6 +287,19 @@ reference: `GET /api/catalogue`, human docs at `/docs/explorer/`, OpenAPI at
   fetch error or a 502/503/504, and fails fast on everything else (401, 403,
   or any other status) — don't remove that retry as unnecessary complexity,
   and don't widen it to retry on non-transient statuses.
+- **Writes are far slower than reads, and the timeouts differ accordingly.**
+  Measured live: `POST /api/sites/community/actions` with `schedule_visit`
+  took 19.0s and 13.2s to answer, while `GET /api/team` took 240ms. Writes
+  therefore use `WRITE_TIMEOUT_MS` (45s) and reads `READ_TIMEOUT_MS` (20s).
+  Don't collapse these back into one value: at a shared 20s cutoff a booking
+  aborted mid-flight, counted as a transient failure, and was re-sent —
+  making one ~15s call take ~34s, or fail after ~61s with a false "Cannot
+  reach NHS-SIM" against a simulator that was reachable and just slow.
+- **`409 No service capacity`** is what `schedule_visit` returns when the
+  community team has no slots left (`capacity-community` in the community
+  view carries `{ total, remaining }`; confirmed live at `remaining: 0`,
+  which blocks booking for *every* patient in that world). 409 is
+  deliberately not retried — it's a real refusal, not a transient failure.
 - **`communityResources()` fetches the whole community view once; `bookedCareFor()`
   is a pure filter over the result, not a fetch.** This split dates back to
   when `handleSweep` (since removed, see the project overview above) called

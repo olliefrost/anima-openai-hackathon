@@ -71,6 +71,15 @@ async function sendFile(res, filePath, contentType) {
 // key or a genuine permissions error doesn't wait out three attempts.
 const UPSTREAM_RETRIES = 3;
 const UPSTREAM_RETRY_DELAY_MS = 300;
+const READ_TIMEOUT_MS = 20_000;
+// Writes need far longer than reads. Measured live: `schedule_visit` takes
+// 13-19s just to answer (a read is ~240ms), which sat right on the 20s cutoff
+// both used to share. An abort counts as transient, so a booking would be cut
+// off mid-flight and re-sent — turning one ~15s call into ~34s, or into a
+// false "Cannot reach NHS-SIM" after three attempts against a sim that was
+// reachable and merely slow. Re-sending was safe (same Idempotency-Key) but
+// pointless. Keep this comfortably above the simulator's real write latency.
+const WRITE_TIMEOUT_MS = 45_000;
 
 async function upstream(key, apiPath, params = {}) {
   const url = new URL(apiPath, SIMULATOR_URL);
@@ -84,7 +93,7 @@ async function upstream(key, apiPath, params = {}) {
     try {
       response = await fetch(url, {
         headers: { Authorization: `Bearer ${key}` },
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
       });
     } catch {
       networkError = true;
@@ -212,7 +221,7 @@ async function postAction(key, site, body, idempotencyKey) {
   for (let attempt = 1; attempt <= UPSTREAM_RETRIES; attempt++) {
     let networkError = false;
     try {
-      response = await fetch(url, { ...requestInit, signal: AbortSignal.timeout(20_000) });
+      response = await fetch(url, { ...requestInit, signal: AbortSignal.timeout(WRITE_TIMEOUT_MS) });
     } catch {
       networkError = true;
     }
