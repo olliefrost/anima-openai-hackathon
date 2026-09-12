@@ -47,6 +47,17 @@ follow-up" matches; one titled just "hi" or "moni" — real examples from
 NHS-SIM test data — won't, even if it's the right visit. Treat a **Flagged**
 result as "worth a human look," not a confirmed miss.
 
+Every discrepancy (a **Flagged** or **Needs review** result) also carries an
+urgency score, shown as a badge (e.g. "Urgent gap · 100"). It's driven mainly
+by the clinical urgency the agent read from the discharge note, not by how
+sure the reconciliation is that there's a gap — an urgent note still ranks
+above a routine one even when the best the reconciliation could do is "needs
+review" rather than a confirmed flag. A full sweep is sorted by this score,
+highest first, so the most urgent discrepancies are at the top of the table
+without any extra filtering. A single check just shows its own score; there's
+nothing to rank against. A **Matches** result always scores 0 — there's no
+discrepancy to triage.
+
 ## What it doesn't do
 
 Careloop only reads from NHS-SIM (`hospital` documents, `community`

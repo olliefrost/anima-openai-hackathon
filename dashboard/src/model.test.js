@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reconcile, matchesCareType } from './model.js';
+import { reconcile, matchesCareType, urgencyLabel } from './model.js';
 
 const day = 24 * 3600000;
 const dischargeAt = 100 * day;
@@ -44,4 +44,35 @@ test('a booking with no recorded start time is treated as not provably before di
   const booking = { id: 'b5', title: 'Home visit', kind: 'appointment', startsAt: undefined };
   const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit' }, [booking], dischargeAt);
   assert.equal(result.status, 'ok');
+});
+
+test('urgency score ranks clinical urgency above confirmation certainty', () => {
+  const urgentFlag = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit', urgency: 'urgent' }, [], dischargeAt);
+  const urgentReview = reconcile({ ambiguous: true, careNeeded: true, careType: 'home-visit', urgency: 'urgent' }, [], dischargeAt);
+  const routineFlag = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit', urgency: 'routine' }, [], dischargeAt);
+  const routineReview = reconcile({ ambiguous: true, careNeeded: true, careType: 'home-visit', urgency: 'routine' }, [], dischargeAt);
+  const ok = reconcile({ ambiguous: false, careNeeded: false, careType: null, urgency: null }, [], dischargeAt);
+
+  // Both urgent outcomes outrank both routine outcomes, regardless of
+  // whether the gap was confirmed ("flag") or only suspected ("review").
+  assert.ok(urgentFlag.urgencyScore > urgentReview.urgencyScore);
+  assert.ok(urgentReview.urgencyScore > routineFlag.urgencyScore);
+  assert.ok(routineFlag.urgencyScore > routineReview.urgencyScore);
+  assert.ok(routineReview.urgencyScore > ok.urgencyScore);
+  assert.equal(ok.urgencyScore, 0);
+});
+
+test('a match has no urgency score even when the note itself was urgent', () => {
+  const booking = { id: 'b6', title: 'Home visit', kind: 'appointment', startsAt: dischargeAt + day };
+  const result = reconcile({ ambiguous: false, careNeeded: true, careType: 'home-visit', urgency: 'urgent' }, [booking], dischargeAt);
+  assert.equal(result.status, 'ok');
+  assert.equal(result.urgencyScore, 0);
+});
+
+test('urgencyLabel describes the score band', () => {
+  assert.equal(urgencyLabel(100), 'Urgent gap');
+  assert.equal(urgencyLabel(80), 'Urgent — needs review');
+  assert.equal(urgencyLabel(50), 'Needs follow-up');
+  assert.equal(urgencyLabel(30), 'Needs review');
+  assert.equal(urgencyLabel(0), 'None');
 });
