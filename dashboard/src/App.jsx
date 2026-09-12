@@ -84,7 +84,7 @@ function ConnectionDialog({ dialogRef, loading, error, onConnect }) {
   </dialog>;
 }
 
-function DetailDialog({ dialogRef, record, patient, related, flags, onToggleFlag, onSaveNote, now }) {
+function DetailDialog({ dialogRef, record, patient, related, flags, onSelect, onToggleFlag, onSaveNote }) {
   const [note, setNote] = useState('');
   useEffect(() => setNote(record ? flags[record.id]?.note || '' : ''), [record, flags]);
   if (!record) return <dialog ref={dialogRef} />;
@@ -97,7 +97,7 @@ function DetailDialog({ dialogRef, record, patient, related, flags, onToggleFlag
     <textarea id="note" rows="3" value={note} onChange={event => setNote(event.target.value)} placeholder="What needs chasing, and who should follow up?" />
     <div className="detail-actions"><button className="button primary" onClick={() => onSaveNote(record.id, note)}>Save note &amp; flag</button><button className="button" onClick={() => onToggleFlag(record.id)}>{flags[record.id] ? 'Remove flag' : 'Flag for follow-up'}</button></div>
     <h3>Across this patient’s services</h3><p className="hint">Records are linked by exact patient ID. This thread does not prove a handoff was completed.</p>
-    <div className="timeline">{related.map(item => <button key={item.id} onClick={() => window.dispatchEvent(new CustomEvent('careloop:detail', { detail: item.id }))}><span className={`timeline-dot ${item.done ? 'done' : ''}`} /><strong>{item.title}</strong><small>{names[item.owner] || item.owner} · {item.status} · {formatDate(item.createdAt)}</small></button>)}</div>
+    <div className="timeline">{related.map(item => <button key={item.id} onClick={() => onSelect(item.id)}><span className={`timeline-dot ${item.done ? 'done' : ''}`} /><strong>{item.title}</strong><small>{names[item.owner] || item.owner} · {item.status} · {formatDate(item.createdAt)}</small></button>)}</div>
     <details><summary>Inspect source payload</summary><pre>{JSON.stringify(record.data, null, 2)}</pre></details>
   </div></dialog>;
 }
@@ -132,12 +132,6 @@ export default function App() {
     && (service === 'all' || record.seenIn.includes(service))
     && `${patientMap.get(record.patientId)?.name || ''} ${record.patientId} ${record.title} ${record.status}`.toLowerCase().includes(search.toLowerCase()));
 
-  useEffect(() => {
-    const openDetail = event => { setSelectedId(event.detail); detailDialog.current?.showModal(); };
-    window.addEventListener('careloop:detail', openDetail);
-    return () => window.removeEventListener('careloop:detail', openDetail);
-  }, []);
-
   function persistFlags(next) {
     setFlags(next);
     try { localStorage.setItem(`careloop:flags:${namespace}`, JSON.stringify(next)); }
@@ -148,6 +142,15 @@ export default function App() {
     const next = { ...flags };
     if (next[id]) delete next[id]; else next[id] = { note: '', at: Date.now() };
     persistFlags(next);
+  }
+
+  function showConnection() {
+    if (!connectionDialog.current?.open) connectionDialog.current?.showModal();
+  }
+
+  function showDetail(id) {
+    setSelectedId(id);
+    if (!detailDialog.current?.open) detailDialog.current?.showModal();
   }
 
   async function connect(candidate) {
@@ -166,7 +169,7 @@ export default function App() {
       return true;
     } catch (error) {
       setConnectError(error.message);
-      connectionDialog.current?.showModal();
+      showConnection();
       return false;
     } finally { setLoading(false); }
   }
@@ -181,21 +184,21 @@ export default function App() {
   return <>
     <Sidebar view={view} setView={setView} attentionCount={attention.length} />
     <main>
-      <header><div className="breadcrumb">Workspace <span>/</span> Care overview</div><button className="button" onClick={() => connectionDialog.current?.showModal()}>{live ? 'Connected · change key' : 'Connect simulator ↗'}</button></header>
-      <section className="heading"><div><div className="eyebrow">CONTINUITY OF CARE</div><h1>Nothing slips through.</h1><p>One place to spot pending care and close the loop.</p></div><button className="button" disabled={loading} onClick={() => live ? connect(key) : connectionDialog.current?.showModal()}>{loading ? '↻ Syncing…' : '↻ Refresh data'}</button></section>
+      <header><div className="breadcrumb">Workspace <span>/</span> Care overview</div><button className="button" onClick={showConnection}>{live ? 'Connected · change key' : 'Connect simulator ↗'}</button></header>
+      <section className="heading"><div><div className="eyebrow">CONTINUITY OF CARE</div><h1>Nothing slips through.</h1><p>One place to spot pending care and close the loop.</p></div><button className="button" disabled={loading} onClick={() => live ? connect(key) : showConnection()}>{loading ? '↻ Syncing…' : '↻ Refresh data'}</button></section>
       <div className="notice" role="status">{live ? <><span className="connection-dot" /> Connected to <strong>{namespace}</strong> · Simulator time {formatDate(now)}{sources.some(source => source.error || source.truncated) && <> · <strong>Partial data — check service status below</strong></>}</> : <><span className="demo-pill">DEMO</span> Exploring sample data. Connect your NHS-SIM team to see your own care records.</>}{storageWarning && ' · Browser storage unavailable; flags may not persist.'}</div>
       <section className="metrics" aria-label="Worklist summary">{metrics.map(([label, count, subtitle, metricView], index) => <button key={label} className={`metric m${index} ${view === metricView ? 'selected' : ''}`} onClick={() => setView(metricView)}><span>{label}<b>{['↗', '◷', '!', '⚑'][index]}</b></span><strong>{count}</strong><small>{subtitle}</small></button>)}</section>
       <section className="sources" aria-label="Service sources">{sources.map(source => <button key={source.site} className={`source ${service === source.site ? 'chosen' : ''}`} onClick={() => setService(service === source.site ? 'all' : source.site)}><span className={`source-icon ${source.site}`}>{icons[source.site]}</span><div><strong>{names[source.site]}</strong><small>{source.error || `${pending.filter(record => record.seenIn.includes(source.site)).length} pending · ${live ? source.truncated ? `Latest ${source.resources.length} of ${source.resourceTotal}` : 'Synced' : 'Sample data'}`}</small></div><span className={`source-status ${source.error ? 'failed' : ''}`}>{source.error ? '!' : '●'}</span></button>)}</section>
       <section className="worklist">
         <div className="section-title"><div><h2>Care worklist <span>{filtered.length}</span></h2><p>Follow the handoff. Find what needs a nudge.</p></div><div className="legend"><i /> Potential gap, for review</div></div>
         <div className="controls"><div className="tabs" role="group" aria-label="Worklist status">{[['all', 'All pending'], ['attention', 'Needs attention'], ['flagged', 'Flagged'], ['complete', 'Completed']].map(([value, label]) => <button key={value} className={view === value ? 'selected' : ''} onClick={() => setView(value)}>{label}</button>)}</div><div className="filters"><input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search patient or task…" aria-label="Search patient or task" /><select value={service} onChange={event => setService(event.target.value)} aria-label="Filter service"><option value="all">All services</option>{sites.map(site => <option key={site} value={site}>{names[site]}</option>)}</select></div></div>
-        <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Task &amp; handoff</th><th>Service</th><th>Status</th><th>Due</th><th><span className="sr-only">Review</span></th></tr></thead><tbody>{filtered.map(record => { const patient = patientMap.get(record.patientId); const name = patient?.name || record.patientId; const initials = name.split(' ').slice(0, 2).map(part => part[0]).join(''); return <tr key={record.id}><td><button className="patient-button" onClick={() => { setSelectedId(record.id); detailDialog.current?.showModal(); }}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{record.patientId}</small></span></button></td><td><button className="task-button" onClick={() => { setSelectedId(record.id); detailDialog.current?.showModal(); }}>{record.title}</button><small>{record.reason}</small></td><td><span className="service-label">{names[record.owner] || record.owner || 'Unassigned'}</span><small>{record.seenIn.length > 1 ? `Visible in ${record.seenIn.length} services` : record.kind.replaceAll('_', ' ')}</small></td><td><span className={`badge ${record.done ? 'green' : record.attention ? 'amber' : ''}`}>{recordStatus(record)}</span></td><td className={`due ${record.overdue ? 'late' : ''}`}>{dueLabel(record, now)}</td><td><button className={`flag ${flags[record.id] ? 'is-flagged' : ''}`} onClick={() => toggleFlag(record.id)} aria-label={`${flags[record.id] ? 'Unflag' : 'Flag'} ${record.title}`} aria-pressed={Boolean(flags[record.id])}>⚑</button></td></tr>; })}</tbody></table></div>
+        <div className="table-wrap"><table><thead><tr><th>Patient</th><th>Task &amp; handoff</th><th>Service</th><th>Status</th><th>Due</th><th><span className="sr-only">Review</span></th></tr></thead><tbody>{filtered.map(record => { const patient = patientMap.get(record.patientId); const name = patient?.name || record.patientId; const initials = name.split(' ').slice(0, 2).map(part => part[0]).join(''); return <tr key={record.id}><td><button className="patient-button" onClick={() => showDetail(record.id)}><span className="avatar">{initials}</span><span><strong>{name}</strong><small>{record.patientId}</small></span></button></td><td><button className="task-button" onClick={() => showDetail(record.id)}>{record.title}</button><small>{record.reason}</small></td><td><span className="service-label">{names[record.owner] || record.owner || 'Unassigned'}</span><small>{record.seenIn.length > 1 ? `Visible in ${record.seenIn.length} services` : record.kind.replaceAll('_', ' ')}</small></td><td><span className={`badge ${record.done ? 'green' : record.attention ? 'amber' : ''}`}>{recordStatus(record)}</span></td><td className={`due ${record.overdue ? 'late' : ''}`}>{dueLabel(record, now)}</td><td><button className={`flag ${flags[record.id] ? 'is-flagged' : ''}`} onClick={() => toggleFlag(record.id)} aria-label={`${flags[record.id] ? 'Unflag' : 'Flag'} ${record.title}`} aria-pressed={Boolean(flags[record.id])}>⚑</button></td></tr>; })}</tbody></table></div>
         {filtered.length === 0 && <div className="empty">No matching items.<p>Try a different filter or search.</p></div>}
         <footer className="table-footer"><span>Showing {filtered.length} of {records.length} patient-linked records</span><span>Flags are saved on this browser · source records stay unchanged</span></footer>
       </section>
       <p className="footnote">NHS-SIM synthetic data · Overdue uses the simulator clock. An open item without a due time is highlighted after 48 hours. These signals suggest review, not a confirmed care omission.</p>
     </main>
     <ConnectionDialog dialogRef={connectionDialog} loading={loading} error={connectError} onConnect={connect} />
-    <DetailDialog dialogRef={detailDialog} record={selected} patient={selected && patientMap.get(selected.patientId)} related={related} flags={flags} now={now} onToggleFlag={toggleFlag} onSaveNote={(id, note) => persistFlags({ ...flags, [id]: { note, at: Date.now() } })} />
+    <DetailDialog dialogRef={detailDialog} record={selected} patient={selected && patientMap.get(selected.patientId)} related={related} flags={flags} onSelect={showDetail} onToggleFlag={toggleFlag} onSaveNote={(id, note) => persistFlags({ ...flags, [id]: { note, at: Date.now() } })} />
   </>;
 }
