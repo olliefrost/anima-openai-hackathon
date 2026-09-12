@@ -77,9 +77,29 @@ function DischargeSections({ sections }) {
   return <dl>{entries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>;
 }
 
-function BookingsList({ bookings }) {
+// Per-booking verdict badge from a bookingEvaluations entry (see model.js
+// evaluateBookings). `matches` is true/false/null — null covers both "not
+// checked" (before discharge, ambiguous decision, no care needed) and
+// "unverifiable" (an `other` care type), which the reason text disambiguates.
+function matchBadge(matches) {
+  if (matches === true) return { label: 'Matches decision', className: 'green' };
+  if (matches === false) return { label: "Doesn't match decision", className: 'red' };
+  return { label: 'Not checked', className: '' };
+}
+
+function BookingsList({ bookings, evaluations }) {
   if (bookings.length === 0) return <p className="hint">No community records found for this patient.</p>;
-  return <div className="timeline">{bookings.map((booking) => <div key={booking.id}><span className={`timeline-dot ${booking.status === 'completed' ? 'done' : ''}`} /><strong>{booking.title || booking.kind}</strong><small>{booking.kind} · {booking.status} · {formatDate(booking.startsAt)}</small></div>)}</div>;
+  const evaluationById = new Map((evaluations || []).map((evaluation) => [evaluation.id, evaluation]));
+  return <div className="timeline">{bookings.map((booking) => {
+    const evaluation = evaluationById.get(booking.id);
+    const badge = evaluation && matchBadge(evaluation.matches);
+    return <div key={booking.id}>
+      <span className={`timeline-dot ${booking.status === 'completed' ? 'done' : ''}`} />
+      <strong>{booking.title || booking.kind}</strong>{badge && <span className={`badge ${badge.className}`} style={{ marginLeft: 8 }}>{badge.label}</span>}
+      <small>{booking.kind} · {booking.status} · {formatDate(booking.startsAt)}</small>
+      {evaluation && <small>{evaluation.reason}</small>}
+    </div>;
+  })}</div>;
 }
 
 function ResultDetail({ result }) {
@@ -93,7 +113,11 @@ function ResultDetail({ result }) {
     <div className="detail-alert">
       <StatusBadge status={result.reconciliation.status} /> <UrgencyBadge score={result.reconciliation.urgencyScore} />
       <span style={{ marginLeft: 8 }}>{result.reconciliation.reason}</span>
+      <small>{result.reconciliation.scoreExplanation}</small>
     </div>
+    <h3>Discharge note</h3>
+    <p><strong>{result.dischargeSummary.title}</strong><br /><small>Sent {formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)} by {result.dischargeSummary.sentBy || 'unknown'}</small></p>
+    <details><summary>Discharge note sections</summary><DischargeSections sections={result.dischargeSummary.sections} /></details>
     <h3>Care decision</h3>
     <dl>
       <div><dt>Care needed</dt><dd>{result.decision.careNeeded ? 'Yes' : 'No'}</dd></div>
@@ -102,11 +126,9 @@ function ResultDetail({ result }) {
       <div><dt>Confidence</dt><dd>{result.decision.confidence}</dd></div>
     </dl>
     <p className="hint">{result.decision.rationale}</p>
-    <h3>Discharge note</h3>
-    <p><strong>{result.dischargeSummary.title}</strong><br /><small>Sent {formatDate(result.dischargeSummary.sentAt ?? result.dischargeSummary.createdAt)} by {result.dischargeSummary.sentBy || 'unknown'}</small></p>
-    <details><summary>Discharge note sections</summary><DischargeSections sections={result.dischargeSummary.sections} /></details>
     <h3>Booked community care</h3>
-    <BookingsList bookings={result.bookings} />
+    <p className="hint">Compared against the decided care type, one booking at a time — this is the evidence behind the status above.</p>
+    <BookingsList bookings={result.bookings} evaluations={result.reconciliation.bookingEvaluations} />
   </>;
 }
 
