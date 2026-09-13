@@ -118,10 +118,5 @@ AGENTS.md         Conventions, NHS-SIM API notes, and guardrails for AI coding a
 This repo was built with, and is documented for, AI coding agents.
 [`AGENTS.md`](./AGENTS.md) covers coding conventions, the NHS-SIM API
 findings gathered during development, and the clinical-product guardrails
-that apply to any change - read it before touching the decision or
-reconciliation logic. [`docs/flow.md`](./docs/flow.md) has the full call
+that apply to any change. [`docs/flow.md`](./docs/flow.md) has the full call
 sequence and decision table if you need more detail than the summary above.
-
-## License
-
-MIT - see [LICENSE](./LICENSE).
