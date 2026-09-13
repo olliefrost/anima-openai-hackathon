@@ -9,7 +9,7 @@ const decisionSchema = z.object({
   careNeeded: z.boolean().describe('Whether the discharge note indicates the patient needs community-service follow-up care.'),
   careType: z.enum(careTypes).nullable().describe('The single best-matching category of care needed. Null when careNeeded is false.'),
   urgency: z.enum(['routine', 'urgent']).nullable().describe('How soon the care should start. Null when careNeeded is false.'),
-  ambiguous: z.boolean().describe('True when the note does not give enough information to decide confidently — prefer this over guessing.'),
+  ambiguous: z.boolean().describe('True when the note does not give enough information to decide confidently - prefer this over guessing.'),
   confidence: z.enum(['low', 'medium', 'high']),
   rationale: z.string().describe('One or two sentences citing the specific part of the note that drove this decision.'),
   summary: z.string().describe('A short plain-language summary (2-4 sentences) of the discharge note for a non-clinical reviewer: why the patient was admitted and what needs to happen next.'),
@@ -30,8 +30,8 @@ Decide whether the patient needs follow-on care from community services after th
 which single category best fits from exactly this list: ${careTypes.join(', ')}.
 
 Only use information present in the note and patient context. If the note is genuinely ambiguous or
-missing what you'd need to decide — for example "requires community follow-up" with no detail on what
-kind — set ambiguous to true and say why in the rationale, rather than guessing a category. Do not invent
+missing what you'd need to decide - for example "requires community follow-up" with no detail on what
+kind - set ambiguous to true and say why in the rationale, rather than guessing a category. Do not invent
 care needs the text doesn't support. This tool is a review aid: an over-confident wrong answer causes more
 harm than an honest "ambiguous".
 
@@ -50,7 +50,7 @@ const matchVerdictSchema = z.object({
   id: z.string(),
   verdict: z.enum(['matches', 'no-match', 'ambiguous']).describe(
     '"matches" if this booking plausibly delivers the needed care type, "no-match" if it clearly does not, ' +
-      '"ambiguous" if the booking\'s text is too generic or terse to tell either way — prefer this over guessing.'
+      '"ambiguous" if the booking\'s text is too generic or terse to tell either way - prefer this over guessing.'
   ),
   reason: z.string().describe("One sentence citing what in the booking's title, kind, status, or data supports this verdict."),
 });
@@ -64,10 +64,10 @@ You are given the care type decided as needed, the rationale behind that decisio
 bookings made for this patient after discharge (each with an id, title, kind, status, and any other recorded
 detail). For EACH booking, decide whether it plausibly represents that care type being delivered.
 
-Use clinical judgement, not literal keyword matching — for example "wound dressing change" plausibly
+Use clinical judgement, not literal keyword matching - for example "wound dressing change" plausibly
 fulfils district nursing, and "OT home assessment" plausibly fulfils occupational therapy, even without an
 exact phrase match. But when a booking's text is too generic or terse to tell either way (for example a
-title as bare as "hi" or "visit" with no other detail), mark it ambiguous rather than guessing — the same
+title as bare as "hi" or "visit" with no other detail), mark it ambiguous rather than guessing - the same
 principle as the original care decision: an over-confident wrong verdict here is worse than an honest
 "unclear".
 
@@ -89,7 +89,7 @@ function getApp() {
 }
 
 // `history()` is what actually puts the prompt passed to `app.run()` in
-// front of the model — without it, only the system prompt is sent and the
+// front of the model - without it, only the system prompt is sent and the
 // model has nothing to decide from. Both agents below need it.
 function getDecisionAgent() {
   requireOpenAiKey();
@@ -143,7 +143,7 @@ export async function evaluateDischargeNote({ sections, patient }) {
 
   // `output: { schema }` already constrains the model's response, but ADK's
   // structured output goes through a "forgiving" parser (coercion, partial
-  // matches) rather than a hard schema gate — re-validating here is the
+  // matches) rather than a hard schema gate - re-validating here is the
   // actual boundary check before an unvalidated shape reaches reconciliation.
   const parsed = decisionSchema.safeParse(result.output.value);
   if (!parsed.success || !hasValidHomeVisitDraft(parsed.data)) {
@@ -159,7 +159,7 @@ function formatBookingForPrompt(booking) {
 }
 
 // Reasons about whether each booking actually delivers the decided care
-// type — the replacement for keyword matching. `bookings` should already be
+// type - the replacement for keyword matching. `bookings` should already be
 // filtered to whatever's actually worth checking (see model.js's
 // bookingsToEvaluate); this returns one verdict per booking, same order.
 export async function evaluateCareMatch({ careType, rationale, bookings }) {

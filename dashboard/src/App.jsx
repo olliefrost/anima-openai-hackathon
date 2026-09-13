@@ -5,7 +5,7 @@ function formatDate(timestamp) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
 }
 
-// Readable headings for the discharge note's raw section keys — falls back to
+// Readable headings for the discharge note's raw section keys - falls back to
 // a generic camelCase-to-words split for any key not listed here.
 const SECTION_LABELS = {
   reason: 'Reason for admission',
@@ -82,7 +82,7 @@ function DischargeLetter({ sections }) {
 // The centerpiece: a home visit that's needed but not yet booked gets a
 // drafted, editable form the reviewer confirms before anything is sent.
 // Careloop's one write (see AGENTS.md) only ever fires from this explicit
-// click — never automatically, and never for any other care type. Booking
+// click - never automatically, and never for any other care type. Booking
 // also sends the patient an SMS confirming the date/time, as part of that
 // same confirmed action rather than a separate step.
 function HomeVisitBooking({ simulatorKey, patientId, decision, reconciliation, onBooked }) {
@@ -97,7 +97,7 @@ function HomeVisitBooking({ simulatorKey, patientId, decision, reconciliation, o
   if (decision.careType !== 'home-visit' || !decision.careNeeded || decision.ambiguous) return null;
 
   if (reconciliation.status === 'ok') {
-    return <div className="booking-card booked"><strong>Home visit already booked</strong><p className="hint">A matching community booking was found after discharge — nothing to do here.</p></div>;
+    return <div className="booking-card booked"><strong>Home visit already booked</strong><p className="hint">A matching community booking was found after discharge - nothing to do here.</p></div>;
   }
   if (reconciliation.status === 'review') {
     return <div className="booking-card"><strong>Needs a human read before booking</strong><p className="hint">{reconciliation.reason}</p></div>;
@@ -108,7 +108,7 @@ function HomeVisitBooking({ simulatorKey, patientId, decision, reconciliation, o
   if (status === 'booked') {
     return <div className="booking-card booked">
       <strong>Home visit booked</strong>
-      <p className="hint">Community care already has it. {notified ? 'A simulated SMS confirmation has been queued in NHS-SIM.' : "The patient's SMS confirmation could not be sent — let them know the appointment time another way."}</p>
+      <p className="hint">Community care already has it. {notified ? 'A simulated SMS confirmation has been queued in NHS-SIM.' : "The patient's SMS confirmation could not be sent - let them know the appointment time another way."}</p>
     </div>;
   }
 
@@ -126,7 +126,7 @@ function HomeVisitBooking({ simulatorKey, patientId, decision, reconciliation, o
   }
 
   return <div className="booking-card">
-    <strong>Home visit needed — not yet booked</strong>
+    <strong>Home visit needed - not yet booked</strong>
     <p className="hint">No matching community booking was found after discharge. The title and handover below were drafted by the care-decision model from this discharge note. Review and edit them, then confirm.</p>
     <label htmlFor="visit-title">Title</label>
     <input id="visit-title" maxLength={500} disabled={status === 'sending'} value={title} onChange={(event) => setTitle(event.target.value)} />
@@ -391,7 +391,7 @@ export default function App() {
         {!result && !checkError && <div className="empty">{team ? 'Enter a patient ID above and run a check.' : 'Connect your NHS-SIM team first.'}</div>}
       </section>}
 
-      <p className="footnote">NHS-SIM synthetic data · Careloop only ever writes to NHS-SIM when you explicitly confirm a drafted home-visit booking — every other read stays read-only. A flag is a starting point for a human check, not a confirmed care omission.</p>
+      <p className="footnote">NHS-SIM synthetic data · Careloop only ever writes to NHS-SIM when you explicitly confirm a drafted home-visit booking - every other read stays read-only. A flag is a starting point for a human check, not a confirmed care omission.</p>
     </main>
     <ConnectionDialog dialogRef={connectionDialog} loading={loading} error={connectError} onConnect={connect} />
   </>;

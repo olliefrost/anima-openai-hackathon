@@ -40,7 +40,7 @@ test('care needed but the agent confirms the only booking is a different care ty
 });
 
 test('an agent-ambiguous verdict on a too-terse booking needs review, not a claimed match or flag', () => {
-  // "hi" is a real example of a bare NHS-SIM booking title (see AGENTS.md) —
+  // "hi" is a real example of a bare NHS-SIM booking title (see AGENTS.md) -
   // too terse for the care-match agent to confidently say either way.
   const booking = { id: 'b4', title: 'hi', kind: 'appointment', startsAt: dischargeAt + day };
   const matchVerdicts = verdictMap([['b4', 'ambiguous', 'Title "hi" gives no detail on what care was delivered.']]);
@@ -104,7 +104,7 @@ test('a match has no urgency score even when the note itself was urgent', () => 
 
 test('urgencyLabel describes the score band', () => {
   assert.equal(urgencyLabel(100), 'Urgent gap');
-  assert.equal(urgencyLabel(80), 'Urgent — needs review');
+  assert.equal(urgencyLabel(80), 'Urgent - needs review');
   assert.equal(urgencyLabel(50), 'Needs follow-up');
   assert.equal(urgencyLabel(30), 'Needs review');
   assert.equal(urgencyLabel(0), 'None');

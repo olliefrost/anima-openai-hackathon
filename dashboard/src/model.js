@@ -1,5 +1,5 @@
 // Pure, testable rules for deciding whether booked community care matches a
-// discharge decision. No I/O, no framework — see careAgent.js (server-side)
+// discharge decision. No I/O, no framework - see careAgent.js (server-side)
 // for the LLM calls that produce a `decision` and, per booking, a match
 // verdict, and server.js for the NHS-SIM fetches that produce `bookings`.
 
@@ -15,7 +15,7 @@ export const careTypes = [
 ];
 
 // A booking or discharge time that's missing or unparseable counts as "not
-// provably before discharge" rather than being excluded — the guardrail
+// provably before discharge" rather than being excluded - the guardrail
 // here is to under-flag on missing data, not over-flag on it.
 function isAfterDischarge(booking, dischargeAt) {
   return !Number.isFinite(dischargeAt) || !Number.isFinite(booking.startsAt) || booking.startsAt >= dischargeAt;
@@ -24,14 +24,14 @@ function isAfterDischarge(booking, dischargeAt) {
 // Which post-discharge bookings are actually worth asking the care-match
 // agent about (see careAgent.js's evaluateCareMatch). An ambiguous decision
 // or "no care needed" already means there's nothing to check a booking
-// against — see evaluateBookings below — so callers shouldn't spend an
+// against - see evaluateBookings below - so callers shouldn't spend an
 // agent call on those cases.
 export function bookingsToEvaluate(decision, bookings, dischargeAt) {
   if (decision.ambiguous || !decision.careNeeded || !decision.careType) return [];
   return bookings.filter((booking) => isAfterDischarge(booking, dischargeAt));
 }
 
-// Per-booking breakdown behind the reconciliation status — every booking
+// Per-booking breakdown behind the reconciliation status - every booking
 // gets a verdict and a plain-text reason, even ones that didn't end up
 // affecting the outcome (booked before discharge, or nothing to check
 // against), so a reviewer can see exactly what was and wasn't counted.
@@ -41,12 +41,12 @@ export function bookingsToEvaluate(decision, bookings, dischargeAt) {
 // bookings bookingsToEvaluate() would return for this same decision. A
 // booking excluded before that point (booked before discharge, ambiguous
 // decision, no care needed) never reaches the agent and gets its own reason
-// here instead — it's never looked up in the map.
+// here instead - it's never looked up in the map.
 export function evaluateBookings(decision, bookings, dischargeAt, matchVerdicts = new Map()) {
   return bookings.map((booking) => {
     const afterDischarge = isAfterDischarge(booking, dischargeAt);
     if (!afterDischarge) {
-      return { id: booking.id, afterDischarge, matches: null, reason: 'Booked before discharge — not counted as follow-up care.' };
+      return { id: booking.id, afterDischarge, matches: null, reason: 'Booked before discharge - not counted as follow-up care.' };
     }
     if (decision.ambiguous) {
       return { id: booking.id, afterDischarge, matches: null, reason: 'The care decision itself was ambiguous, so this booking was not checked against a care type.' };
@@ -74,7 +74,7 @@ function outcomeFor(decision, evaluations) {
 
   // A booking or the discharge note can be missing a usable timestamp (NHS-SIM
   // doesn't guarantee one on every resource). Treat "unknown" as "can't prove
-  // it was before discharge" rather than excluding it — the guardrail here is
+  // it was before discharge" rather than excluding it - the guardrail here is
   // to under-flag on missing data, not to over-flag on it.
   const postDischarge = evaluations.filter((evaluation) => evaluation.afterDischarge);
 
@@ -93,12 +93,12 @@ function outcomeFor(decision, evaluations) {
   }
 
   // No confirmed match, but not every booking was a confirmed non-match
-  // either — at least one came back `ambiguous` from the care-match agent
+  // either - at least one came back `ambiguous` from the care-match agent
   // (it couldn't tell from the booking's text either way). That's a genuine
   // "needs a human read", not a confident flag.
   return {
     status: 'review',
-    reason: `Booked community care for ${decision.careType} could not be confidently matched — needs a human read.`,
+    reason: `Booked community care for ${decision.careType} could not be confidently matched - needs a human read.`,
   };
 }
 
@@ -107,7 +107,7 @@ function outcomeFor(decision, evaluations) {
 // dominates over how *sure* the reconciliation is that there's a gap: an
 // urgent case still needs eyes on it quickly even when the best we could do
 // is "needs review", not a confirmed "flag". `ok` and a missing discharge
-// summary aren't discrepancies at all, so they always score 0 — there's
+// summary aren't discrepancies at all, so they always score 0 - there's
 // nothing to triage. Deliberately doesn't factor in `decision.confidence`;
 // that's a statement about how sure the *decision* is, not how urgently a
 // human should look at it, and stays a separate, visible field in the UI.
@@ -116,12 +116,12 @@ const URGENCY_SCORES = {
   review: { urgent: 80, routine: 30 },
 };
 
-// Returns the score plus the one-line reasoning behind it — which band
+// Returns the score plus the one-line reasoning behind it - which band
 // (flag/review) and which half of it (urgent/routine note) produced this
 // number, so the score is never just an unexplained badge.
 function urgencyScoreFor(decision, status) {
   const band = URGENCY_SCORES[status];
-  if (!band) return { score: 0, explanation: 'No discrepancy identified — nothing to triage.' };
+  if (!band) return { score: 0, explanation: 'No discrepancy identified - nothing to triage.' };
   const urgent = decision.urgency === 'urgent';
   const score = urgent ? band.urgent : band.routine;
   const certainty = status === 'flag' ? 'a confirmed gap' : 'an unconfirmed, needs-review gap';
@@ -132,7 +132,7 @@ function urgencyScoreFor(decision, status) {
 // Human-readable version of the score above, for display next to it.
 export function urgencyLabel(score) {
   if (score >= 100) return 'Urgent gap';
-  if (score >= 80) return 'Urgent — needs review';
+  if (score >= 80) return 'Urgent - needs review';
   if (score >= 50) return 'Needs follow-up';
   if (score >= 30) return 'Needs review';
   return 'None';
@@ -145,7 +145,7 @@ export function urgencyLabel(score) {
 //              discharge" comparisons
 // matchVerdicts: Map<bookingId, verdict> from careAgent.js's
 //                evaluateCareMatch(), for the bookings bookingsToEvaluate()
-//                selected — omitted when there was nothing to evaluate.
+//                selected - omitted when there was nothing to evaluate.
 export function reconcile(decision, bookings, dischargeAt, matchVerdicts = new Map()) {
   const bookingEvaluations = evaluateBookings(decision, bookings, dischargeAt, matchVerdicts);
   const outcome = outcomeFor(decision, bookingEvaluations);

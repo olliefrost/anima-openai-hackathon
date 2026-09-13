@@ -64,7 +64,7 @@ async function sendFile(res, filePath, contentType) {
 
 // NHS-SIM sits behind a Caddy reverse proxy (seen on every response's `via`
 // header) that occasionally answers a healthy backend with a bare, empty-body
-// 502 — confirmed live: the same request fails, then succeeds seconds later
+// 502 - confirmed live: the same request fails, then succeeds seconds later
 // with no other change. Every caller here is a read-only GET, so retrying a
 // handful of times is safe; only retry what's actually transient (a network/
 // timeout failure, or 502/503/504) and fail fast on everything else so a bad
@@ -75,7 +75,7 @@ const READ_TIMEOUT_MS = 20_000;
 // Writes need far longer than reads. Measured live: `schedule_visit` takes
 // 13-19s just to answer (a read is ~240ms), which sat right on the 20s cutoff
 // both used to share. An abort counts as transient, so a booking would be cut
-// off mid-flight and re-sent — turning one ~15s call into ~34s, or into a
+// off mid-flight and re-sent - turning one ~15s call into ~34s, or into a
 // false "Cannot reach NHS-SIM" after three attempts against a sim that was
 // reachable and merely slow. Re-sending was safe (same Idempotency-Key) but
 // pointless. Keep this comfortably above the simulator's real write latency.
@@ -129,7 +129,7 @@ async function upstream(key, apiPath, params = {}) {
 // the hospital returned alongside those documents.
 function latestFiledDischarges(resources) {
   // A patient can have more than one discharge episode (different `id`s, e.g. a
-  // seeded example alongside a batch-generated one) — these are separate documents,
+  // seeded example alongside a batch-generated one) - these are separate documents,
   // not edits of one record, so `version` doesn't track which happened more recently.
   // Compare by when the note was actually sent instead.
   const dischargeTime = (doc) => doc.data?.sentAt ?? doc.createdAt ?? 0;
@@ -174,7 +174,7 @@ async function findPatientById(key, patientId) {
 // isn't: it's a single day's capacity schedule and 400s without a `date` param
 // ("A valid date is required"), so it can't be queried by patient. Booked care
 // (visits, care plans, care packages) is patient-linked and shows up in
-// `/api/sites/community/view` instead — the same source the original dashboard
+// `/api/sites/community/view` instead - the same source the original dashboard
 // used, before this tool existed.
 async function communityResources(key) {
   const view = await upstream(key, '/api/sites/community/view', { offset: 0, limit: 500 });
@@ -183,7 +183,7 @@ async function communityResources(key) {
 
 // Shared shape for a community resource, whether it came back from the
 // read-only view fetch or from the one write this tool performs (scheduling
-// a home visit) — so a freshly booked visit looks exactly like one that was
+// a home visit) - so a freshly booked visit looks exactly like one that was
 // already there.
 function normalizeCommunityResource(resource) {
   return {
@@ -271,13 +271,13 @@ async function deliverMessage(key, conversation, idempotencyKey) {
 }
 
 // The only write this tool performs: scheduling a community home visit via
-// NHS-SIM's `schedule_visit` action — and only after a human has reviewed
+// NHS-SIM's `schedule_visit` action - and only after a human has reviewed
 // and confirmed the drafted title/text in the UI. As part of that same
 // confirmed action (not a separate, independently-triggered write), it also
-// sends the patient an SMS via the GP site's `messaging_action` — created,
-// then explicitly delivered, since a created message is only queued — telling
+// sends the patient an SMS via the GP site's `messaging_action` - created,
+// then explicitly delivered, since a created message is only queued - telling
 // them when the visit is booked for. A failure at either step doesn't undo or
-// fail the booking, which already succeeded — it's reported back via
+// fail the booking, which already succeeded - it's reported back via
 // `notified: false` instead, so the UI can show it without risking a
 // duplicate booking from a retry. `notified` means the patient can actually
 // see the message, so a create that never delivers counts as false.
@@ -393,12 +393,12 @@ async function withKey(req, res, handler) {
   } catch (err) {
     // SimulatorError/AgentError messages are written to be shown to the user
     // (bad key, unreachable service, missing OPENAI_API_KEY). Anything else
-    // is unexpected internal failure — rethrow so the outer handler logs it
+    // is unexpected internal failure - rethrow so the outer handler logs it
     // and returns a generic 500 instead of leaking its message to the client.
     if (err instanceof SimulatorError || err instanceof AgentError) {
       // Distinct statuses (401 bad key, 403 no access, 504 unreachable, 502
       // upstream failure) so a real sim/network problem doesn't look
-      // identical to a bad key in the network tab — log server-side too,
+      // identical to a bad key in the network tab - log server-side too,
       // since the message names which dependency failed and never contains
       // a key or patient data.
       console.error(`${req.url}: ${err.message}`);
@@ -508,7 +508,7 @@ const server = createServer(async (req, res) => {
 
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
 
-  // Only a browser sends an Origin header — a same-machine script hitting this
+  // Only a browser sends an Origin header - a same-machine script hitting this
   // API directly (curl, tests) has no origin to check and is already covered
   // by the loopback-only bind above. This blocks a *different* origin's page
   // from using the browser's fetch to reach these routes.

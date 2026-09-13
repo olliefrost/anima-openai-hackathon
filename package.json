@@ -1,4 +1,9 @@
 {
+  "name": "careloop",
+  "version": "0.1.0",
+  "description": "Checks hospital discharge decisions against booked community care and books a home visit on confirmation. Built at the Anima x OpenAI hackathon.",
+  "license": "MIT",
+  "private": true,
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web -c blue,green \"node --watch dashboard/server.js\" \"vite --config dashboard/vite.config.js\"",

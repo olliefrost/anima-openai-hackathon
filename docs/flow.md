@@ -51,8 +51,8 @@ model judgments, not clinical approval or proof that care was delivered.
 ## Reconciliation and presentation
 
 `reconcile` is pure: it consumes the decision, normalized bookings, discharge
- time, and a Map of match verdicts. Every booking gets an evaluation reason,
- including excluded bookings. Missing verdicts stay unchecked, never matched.
+time, and a Map of match verdicts. Every booking gets an evaluation reason,
+including excluded bookings. Missing verdicts stay unchecked, never matched.
 
 Rules are applied in this order:
 
@@ -86,19 +86,24 @@ can show the editable agent draft. Review states do not offer a booking form.
 The reviewer can edit and confirm **Book this visit**, or choose **Not now**.
 
 The confirmed `/api/book-home-visit` call schedules through the community site's
-`schedule_visit` action. It then queues an SMS through the GP site's
-`messaging_action`, using the returned visit's `dueAt` in Europe/London time.
-Without a confirmed time, the SMS says the team will confirm it separately.
-Creation time is never presented as appointment time. SMS failure returns
-`notified: false` without failing or retrying the successful booking.
-These are the only two simulator writes; sweep and check are read-only.
+`schedule_visit` action. It then sends an SMS through the GP site's
+`messaging_action`, using the returned visit's `dueAt` in Europe/London time -
+this takes two commands, `create` then `delivery`, since NHS-SIM only queues a
+created message until its delivery is explicitly marked. Without a confirmed
+time, the SMS says the team will confirm it separately. Creation time is never
+presented as appointment time. Failure at either the create or delivery step
+returns `notified: false` without failing or retrying the successful booking.
+This is the only write Careloop performs: one confirmed action carried out as
+three simulator calls (schedule, create, deliver); sweep and check are
+read-only.
 
 ## Errors, retries, and security
 
 Simulator reads and action writes retry network failures and HTTP 502/503/504
 up to three attempts with backoff. Other statuses fail immediately. Each
 write attempt has a fresh timeout and retries reuse the same idempotency key;
-the SMS key is the booking key plus `-notify`.
+the SMS create call reuses the booking key plus `-notify`, and the delivery
+call plus `-deliver`.
 
 Simulator and agent errors before a sweep starts surface as JSON responses;
 unexpected errors return a generic internal error. Once sweep response headers
